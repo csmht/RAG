@@ -3,6 +3,7 @@ package com.mark.knowledge.rag.app;
 import com.mark.knowledge.rag.dto.ErrorResponse;
 import com.mark.knowledge.rag.dto.RagRequest;
 import com.mark.knowledge.rag.dto.RagResponse;
+import com.mark.knowledge.rag.service.ConversationMemoryService;
 import com.mark.knowledge.rag.service.RagService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,9 +23,11 @@ public class RagController {
     private static final Logger log = LoggerFactory.getLogger(RagController.class);
 
     private final RagService ragService;
+    private final ConversationMemoryService conversationMemoryService;
 
-    public RagController(RagService ragService) {
+    public RagController(RagService ragService, ConversationMemoryService conversationMemoryService) {
         this.ragService = ragService;
+        this.conversationMemoryService = conversationMemoryService;
     }
 
     /**
@@ -38,15 +41,12 @@ public class RagController {
         log.info("收到 RAG 问题: {}", request.question());
 
         try {
-            // 验证请求
             if (request.question() == null || request.question().trim().isEmpty()) {
                 return ResponseEntity.badRequest()
                     .body(new ErrorResponse("无效请求", "问题不能为空"));
             }
 
-            // 处理 RAG 请求
             RagResponse response = ragService.ask(request);
-
             return ResponseEntity.ok(response);
 
         } catch (Exception e) {
@@ -54,6 +54,18 @@ public class RagController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse("请求失败", e.getMessage()));
         }
+    }
+
+    /**
+     * 清空指定会话上下文
+     *
+     * @param conversationId 会话ID
+     * @return 清理结果
+     */
+    @DeleteMapping("/conversations/{conversationId}")
+    public ResponseEntity<String> clearConversation(@PathVariable String conversationId) {
+        conversationMemoryService.clear(conversationId);
+        return ResponseEntity.ok("会话上下文已清空");
     }
 
     /**

@@ -1,8 +1,10 @@
 package com.mark.knowledge.rag.app;
 
 
+import com.mark.knowledge.rag.dto.DocumentDeleteResponse;
 import com.mark.knowledge.rag.dto.DocumentResponse;
 import com.mark.knowledge.rag.dto.ErrorResponse;
+import com.mark.knowledge.rag.service.DocumentAdminService;
 import com.mark.knowledge.rag.service.DocumentService;
 import com.mark.knowledge.rag.service.EmbeddingService;
 import org.slf4j.Logger;
@@ -14,6 +16,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
+import java.util.Locale;
 
 /**
  * 文档上传和管理控制器
@@ -28,12 +31,15 @@ public class DocumentController {
 
     private final DocumentService documentService;
     private final EmbeddingService embeddingService;
+    private final DocumentAdminService documentAdminService;
 
     public DocumentController(
             DocumentService documentService,
-            EmbeddingService embeddingService) {
+            EmbeddingService embeddingService,
+            DocumentAdminService documentAdminService) {
         this.documentService = documentService;
         this.embeddingService = embeddingService;
+        this.documentAdminService = documentAdminService;
     }
 
     /**
@@ -47,30 +53,32 @@ public class DocumentController {
         log.info("收到文档上传请求: {}", file.getOriginalFilename());
 
         try {
-            // 验证文件
             if (file.isEmpty()) {
                 return ResponseEntity.badRequest()
                     .body(new ErrorResponse("无效文件", "文件为空"));
             }
 
             String filename = file.getOriginalFilename();
-            if (filename == null) {
+            if (filename == null || filename.isBlank()) {
                 return ResponseEntity.badRequest()
                     .body(new ErrorResponse("无效文件", "文件名缺失"));
             }
 
-            // 处理文档
+            String lowerFilename = filename.toLowerCase(Locale.ROOT);
+            if (!lowerFilename.endsWith(".pdf") && !lowerFilename.endsWith(".txt")) {
+                return ResponseEntity.badRequest()
+                    .body(new ErrorResponse("不支持的文件类型", "仅支持 PDF 和 TXT 文件"));
+            }
+
             try (InputStream inputStream = file.getInputStream()) {
                 DocumentService.ProcessedDocument processed = documentService.processDocument(
                     inputStream,
                     filename
                 );
 
-                // 存储向量嵌入
                 int embeddingCount = embeddingService.storeSegments(processed.segments());
 
-                log.info("文档处理成功: {} ({} 个片段)",
-                    filename, embeddingCount);
+                log.info("文档处理成功: {} ({} 个片段)", filename, embeddingCount);
 
                 return ResponseEntity.ok(new DocumentResponse(
                     processed.documentId(),
@@ -84,6 +92,44 @@ public class DocumentController {
             log.error("文档处理失败", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse("处理失败", e.getMessage()));
+        }
+    }
+
+    /**
+     * 查看已上传文档列表
+     *
+     * @return 文档列表
+     */
+    @GetMapping
+    public ResponseEntity<?> listDocuments() {
+        try {
+            return ResponseEntity.ok(documentAdminService.listDocuments());
+        } catch (Exception e) {
+            log.error("获取文档列表失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new ErrorResponse("查询失败", e.getMessage()));
+        }
+    }
+
+    /**
+     * 删除指定文档
+     *
+     * @param documentId 文档ID
+     * @return 删除结果
+     */
+    @DeleteMapping("/{documentId}")
+    public ResponseEntity<?> deleteDocument(@PathVariable String documentId) {
+        try {
+            DocumentDeleteResponse response = documentAdminService.deleteByDocumentId(documentId);
+            if (response.deletedSegments() == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(new ErrorResponse("未找到文档", "未找到 documentId=" + documentId + " 对应的知识文档"));
+            }
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("删除文档失败: {}", documentId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new ErrorResponse("删除失败", e.getMessage()));
         }
     }
 

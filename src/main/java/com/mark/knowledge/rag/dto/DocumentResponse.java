@@ -1,7 +1,7 @@
 package com.mark.knowledge.rag.dto;
 
 /**
- * Response DTO for document operations.
+ * 文档处理响应。
  */
 public record DocumentResponse(
     String documentId,
@@ -13,11 +13,11 @@ public record DocumentResponse(
         return new DocumentResponse(
             documentId,
             filename,
-            "Document processed successfully",
+            "文档处理成功",
             segmentCount
         );
     }
-    
+
     public static DocumentResponse error(String message) {
         return new DocumentResponse(
             null,

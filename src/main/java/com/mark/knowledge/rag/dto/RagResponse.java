@@ -3,7 +3,7 @@ package com.mark.knowledge.rag.dto;
 import java.util.List;
 
 /**
- * Response DTO for RAG answers with sources.
+ * RAG 问答响应。
  */
 public record RagResponse(
     String answer,

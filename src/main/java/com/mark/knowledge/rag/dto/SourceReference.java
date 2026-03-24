@@ -1,7 +1,7 @@
 package com.mark.knowledge.rag.dto;
 
 /**
- * Represents a source reference in RAG responses.
+ * RAG 来源片段。
  */
 public record SourceReference(
     String filename,

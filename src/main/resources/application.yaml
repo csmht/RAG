@@ -5,62 +5,13 @@ spring:
     multipart:
       max-file-size: 50MB
       max-request-size: 50MB
-  web:
-    resources:
-      static-locations: classpath:/static/
-  jpa:
-    database-platform: org.hibernate.community.dialect.SQLiteDialect
-    hibernate:
-      ddl-auto: update
-    show-sql: false
-  datasource:
-    url: jdbc:sqlite:knowledge.db
-    driver-class-name: org.sqlite.JDBC
-  main:
-    allow-bean-definition-overriding: true
 
-# SQLite配置
-sqlite:
-  url: jdbc:sqlite:knowledge.db
-
-# Ollama配置
 ollama:
   base-url: http://localhost:11434
   chat-model: qwen2.5:7b
   embedding-model: qwen3-embedding:0.6b
   timeout: 120s
 
-# 阿里云DashScope配置
-dashscope:
-  api-key: ${DASHSCOPE_API_KEY:your-api-key-here}
-  base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  model: qwen-plus
-  timeout: 60s
-
-# 模型路由配置
-model-router:
-  # 路由策略：PERCENTAGE（百分比）或 BUSINESS_TYPE（业务类型）
-  strategy: PERCENTAGE
-  # 百分比配置（当strategy=PERCENTAGE时生效）
-  percentage:
-    # 阿里云模型百分比（0-100）
-    aliyun: 100
-    # 本地模型百分比（0-100）
-    local: 0
-  # 业务类型路由（当strategy=BUSINESS_TYPE时生效）
-  business-type:
-    # 使用阿里云模型的业务类型
-    aliyun-types:
-      - COMPLEX_QUERY      # 复杂查询
-      - LONG_CONTEXT       # 长上下文
-      - HIGH_PRECISION     # 高精度要求
-    # 使用本地模型的业务类型
-    local-types:
-      - SIMPLE_QA          # 简单问答
-      - TOOL_CALLING       # 工具调用
-      - GENERAL_CHAT       # 通用对话
-
-# Qdrant配置
 qdrant:
   host: localhost
   port: 6334
@@ -69,33 +20,15 @@ qdrant:
   vector-size: 1024
   create-collection-if-not-exists: true
 
-# RAG配置
 rag:
   chunk-size: 500
   chunk-overlap: 50
   max-results: 5
   min-score: 0.5
+  memory-window: 6
+  session-ttl-seconds: 1800
+  memory-cleanup-interval-ms: 300000
 
-# Agent配置
-agent:
-  # 上下文滑动窗口大小（保留最近N条消息）
-  context-window-size: 10
-  # 是否启用向量数据库查询
-  vector-store-enabled: true
-  # 是否启用 MCP 文件操作
-  mcp-file-enabled: true
-  # 是否启用工具调用
-  tool-call-enabled: true
-  # 向量数据库最大结果数
-  vector-max-results: 5
-  # 向量数据库最小相似度分数
-  vector-min-score: 0.5
-  # MCP 允许访问的目录
-  mcp-allowed-directory: ${user.dir}
-  # Agent 执行超时时间（秒）
-  agent-timeout-seconds: 120
-
-# 日志配置
 logging:
   level:
     root: INFO

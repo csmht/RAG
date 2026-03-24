@@ -3,7 +3,7 @@ package com.mark.knowledge.rag.dto;
 import java.time.LocalDateTime;
 
 /**
- * Standard error response DTO.
+ * 标准错误响应。
  */
 public record ErrorResponse(
     String error,
@@ -13,8 +13,8 @@ public record ErrorResponse(
     public ErrorResponse(String error, String message) {
         this(error, message, LocalDateTime.now());
     }
-    
+
     public ErrorResponse(String message) {
-        this("Error", message, LocalDateTime.now());
+        this("错误", message, LocalDateTime.now());
     }
 }
