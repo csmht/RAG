@@ -21,14 +21,13 @@ public class KnowledgeApplication {
 				.ignoreIfMissing()
 				.load();
 
-		// 将 .env 中的变量注入到系统环境变量中，供 Spring Boot 使用
+		// 将 .env 中的变量注入到系统属性中，供 Spring Boot 使用
+		// .env 文件使用 Spring Boot 标准属性格式 (如 ollama.base-url)
 		dotenv.entries().forEach(entry -> {
 			String key = entry.getKey();
 			String value = entry.getValue();
-			// 将 dotenv 的 key 格式转换为 Spring Boot 兼容格式
-			String springKey = key.replace(".", "-").toLowerCase();
-			System.setProperty(springKey, value);
-			log.debug("注入配置：{}={}", springKey, value);
+			System.setProperty(key, value);
+			log.debug("注入配置：{}={}", key, value);
 		});
 
 		log.info("已从 .env 文件加载配置");
