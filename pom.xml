@@ -55,8 +55,8 @@
 	<properties>
 		<java.version>21</java.version>
 		<!-- LangChain4j version -->
-		<langchain4j.version>1.11.0</langchain4j.version>
-		<langchain4j-qdrant.version>1.11.0-beta19</langchain4j-qdrant.version>
+		<langchain4j.version>1.12.2</langchain4j.version>
+		<langchain4j-qdrant.version>1.12.2-beta22</langchain4j-qdrant.version>
         <!-- Jackson 3 is managed by Spring Boot 4 (package: tools.jackson) -->
 	</properties>
 	<dependencies>

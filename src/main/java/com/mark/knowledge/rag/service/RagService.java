@@ -65,6 +65,8 @@ public class RagService {
                 .minScore(minScore)
                 .build();
 
+            log.info("问题向量维度: {}", questionEmbedding.dimension());
+
             EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
             List<EmbeddingMatch<TextSegment>> matches = searchResult.matches();
 
