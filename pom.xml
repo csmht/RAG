@@ -68,6 +68,13 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- dotenv-java: 读取.env 文件 -->
+        <dependency>
+            <groupId>io.github.cdimascio</groupId>
+            <artifactId>dotenv-java</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+
         <!-- Other dependencies -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
