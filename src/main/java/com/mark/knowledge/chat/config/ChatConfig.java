@@ -24,6 +24,9 @@ public class ChatConfig {
     @Value("${ollama.base-url:http://localhost:11434}")
     private String ollamaBaseUrl;
 
+    @Value("${ollama.think:false}")
+    private Boolean ollamaThink;
+
     @Value("${ollama.chat-model:qwen2.5:7b}")
     private String chatModelName;
 
@@ -51,6 +54,7 @@ public class ChatConfig {
         return OllamaChatModel.builder()
                 .baseUrl(ollamaBaseUrl)
                 .modelName(chatModelName)
+                .think(ollamaThink)
                 .temperature(0.7)
                 .timeout(parseTimeout(ollamaTimeout))
                 .build();
