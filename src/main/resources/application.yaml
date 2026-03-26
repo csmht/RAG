@@ -1,36 +1,36 @@
 spring:
   application:
-    name: knowledge
+    name: ${SPRING_APPLICATION_NAME:knowledge}
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size: ${SPRING_MULTIPART_MAX_FILE_SIZE:50MB}
+      max-request-size: ${SPRING_MULTIPART_MAX_REQUEST_SIZE:50MB}
 
 ollama:
-  base-url: http://localhost:11434
-  chat-model: qwen2.5:7b
-  embedding-model: qwen3-embedding:0.6b
-  timeout: 120s
+  base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+  chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+  embedding-model: ${OLLAMA_EMBEDDING_MODEL:qwen3-embedding:0.6b}
+  timeout: ${OLLAMA_TIMEOUT:120s}
 
 qdrant:
-  host: localhost
-  port: 6334
-  http-port: 6333
-  collection-name: knowledge-base
-  vector-size: 1024
-  create-collection-if-not-exists: true
+  host: ${QDRANT_HOST:localhost}
+  port: ${QDRANT_PORT:6334}
+  http-port: ${QDRANT_HTTP_PORT:6333}
+  collection-name: ${QDRANT_COLLECTION_NAME:knowledge-base}
+  vector-size: ${QDRANT_VECTOR_SIZE:1024}
+  create-collection-if-not-exists: ${QDRANT_CREATE_COLLECTION_IF_NOT_EXISTS:true}
 
 rag:
-  chunk-size: 500
-  chunk-overlap: 50
-  max-results: 5
-  min-score: 0.5
-  memory-window: 6
-  session-ttl-seconds: 1800
-  memory-cleanup-interval-ms: 300000
+  chunk-size: ${RAG_CHUNK_SIZE:500}
+  chunk-overlap: ${RAG_CHUNK_OVERLAP:50}
+  max-results: ${RAG_MAX_RESULTS:5}
+  min-score: ${RAG_MIN_SCORE:0.5}
+  memory-window: ${RAG_MEMORY_WINDOW:6}
+  session-ttl-seconds: ${RAG_SESSION_TTL_SECONDS:1800}
+  memory-cleanup-interval-ms: ${RAG_MEMORY_CLEANUP_INTERVAL_MS:300000}
 
 logging:
   level:
-    root: INFO
-    com.mark.knowledge: DEBUG
-    dev.langchain4j: DEBUG
+    root: ${LOGGING_LEVEL_ROOT:INFO}
+    com.mark.knowledge: ${LOGGING_LEVEL_COM_MARK_KNOWLEDGE:DEBUG}
+    dev.langchain4j: ${LOGGING_LEVEL_DEV_LANGCHAIN4J:DEBUG}
