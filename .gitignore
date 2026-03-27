@@ -35,3 +35,4 @@ build/
 !.env.example
 .claude
 log.txt
+/src/main/resources/application.yaml

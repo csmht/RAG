@@ -12,7 +12,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 
 /**
- * 嵌入服务 - 使用Ollama生成和管理嵌入向量
+ * 嵌入服务 - 使用当前配置的嵌入模型生成和管理嵌入向量
  *
  * 服务职责：
  * - 为文本块生成嵌入向量
@@ -31,7 +31,7 @@ public class EmbeddingService {
     /**
      * 构造函数
      *
-     * @param embeddingModel Ollama嵌入模型
+     * @param embeddingModel 当前配置的嵌入模型
      * @param embeddingStore Qdrant向量存储
      */
     public EmbeddingService(
@@ -45,7 +45,7 @@ public class EmbeddingService {
      * 为文本块生成并存储嵌入向量
      *
      * 处理流程：
-     * 1. 使用Ollama模型生成嵌入向量
+     * 1. 使用当前配置的模型生成嵌入向量
      * 2. 批量存储到Qdrant（每批100个）
      * 3. 记录进度和性能指标
      *
@@ -70,7 +70,7 @@ public class EmbeddingService {
 
             long embedTime = System.currentTimeMillis() - embedStart;
             log.info("✓ 嵌入向量生成成功，耗时: {} ms", embedTime);
-            log.info("  向量维度: {}", embeddings.get(0).dimension());
+            log.info("  向量维度: {}", embeddings.getFirst().dimension());
 
             // 步骤2：存储嵌入向量
             log.info("💾 [步骤2/2] 存储嵌入向量到Qdrant...");

@@ -68,13 +68,6 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- dotenv-java: 读取.env 文件 -->
-        <dependency>
-            <groupId>io.github.cdimascio</groupId>
-            <artifactId>dotenv-java</artifactId>
-            <version>3.0.0</version>
-        </dependency>
-
         <!-- Other dependencies -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -98,6 +91,13 @@
 		<dependency>
 			<groupId>dev.langchain4j</groupId>
 			<artifactId>langchain4j-ollama</artifactId>
+			<version>${langchain4j.version}</version>
+		</dependency>
+
+		<!-- LangChain4j OpenAI-Compatible Integration -->
+		<dependency>
+			<groupId>dev.langchain4j</groupId>
+			<artifactId>langchain4j-open-ai</artifactId>
 			<version>${langchain4j.version}</version>
 		</dependency>
 

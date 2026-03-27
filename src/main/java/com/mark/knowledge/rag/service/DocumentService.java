@@ -82,7 +82,7 @@ public class DocumentService {
             log.info("  解析完成，耗时: {} ms", parseTime);
 
             // 验证内容
-            if (content == null || content.isBlank()) {
+            if (content.isBlank()) {
                 throw new IllegalArgumentException("文档内容为空");
             }
 
