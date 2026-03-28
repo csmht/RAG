@@ -5,6 +5,12 @@ import com.mark.knowledge.rag.dto.RagResponse;
 import com.mark.knowledge.rag.dto.SourceReference;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.PartialResponse;
+import dev.langchain4j.model.chat.response.PartialResponseContext;
+import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import dev.langchain4j.model.chat.response.StreamingHandle;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
@@ -14,9 +20,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -26,6 +41,7 @@ import java.util.stream.Collectors;
 public class RagService {
 
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
+    private static final String EMPTY_MATCH_ANSWER = "未在已上传文档中检索到足够相关的内容，请根据文档内容重新提问。";
 
     @Value("${rag.max-results:5}")
     private int maxResults;
@@ -33,17 +49,24 @@ public class RagService {
     @Value("${rag.min-score:0.5}")
     private double minScore;
 
+    @Value("${rag.stream-timeout-ms:300000}")
+    private long streamTimeoutMs;
+
     private final ChatModel chatModel;
+    private final StreamingChatModel streamingChatModel;
     private final EmbeddingModel embeddingModel;
     private final EmbeddingStore<TextSegment> embeddingStore;
     private final ConversationMemoryService conversationMemoryService;
+    private final ConcurrentHashMap<String, InFlightGeneration> inFlightGenerations = new ConcurrentHashMap<>();
 
     public RagService(
             ChatModel chatModel,
+            StreamingChatModel streamingChatModel,
             EmbeddingModel embeddingModel,
             EmbeddingStore<TextSegment> embeddingStore,
             ConversationMemoryService conversationMemoryService) {
         this.chatModel = chatModel;
+        this.streamingChatModel = streamingChatModel;
         this.embeddingModel = embeddingModel;
         this.embeddingStore = embeddingStore;
         this.conversationMemoryService = conversationMemoryService;
@@ -53,7 +76,11 @@ public class RagService {
         log.info("处理 RAG 问题: {}", request.question());
 
         try {
-            String conversationId = request.conversationId();
+            String conversationId = normalizeConversationId(request.conversationId());
+            if (StringUtils.hasText(conversationId)) {
+                cancelGenerationInternal(conversationId, "同步请求到达，取消已有流式生成");
+            }
+
             List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
                 .getRecentMessages(conversationId);
             String rewrittenQuestion = rewriteQuestion(request.question(), history);
@@ -73,11 +100,10 @@ public class RagService {
             log.info("检索到 {} 条相关片段，最小分数阈值: {}", matches.size(), minScore);
 
             if (matches.isEmpty()) {
-                String emptyAnswer = "未在已上传文档中检索到足够相关的内容，请根据文档内容重新提问。";
                 conversationMemoryService.appendUserMessage(conversationId, request.question());
-                conversationMemoryService.appendAssistantMessage(conversationId, emptyAnswer);
+                conversationMemoryService.appendAssistantMessage(conversationId, EMPTY_MATCH_ANSWER);
                 return new RagResponse(
-                    emptyAnswer,
+                    EMPTY_MATCH_ANSWER,
                     conversationId,
                     new ArrayList<>()
                 );
@@ -93,21 +119,197 @@ public class RagService {
             conversationMemoryService.appendUserMessage(conversationId, request.question());
             conversationMemoryService.appendAssistantMessage(conversationId, answer);
 
-            List<SourceReference> sources = matches.stream()
-                .map(match -> {
-                    TextSegment segment = match.embedded();
-                    String filename = segment.metadata() != null
-                        ? segment.metadata().getString("filename")
-                        : "unknown";
-                    return new SourceReference(filename, segment.text(), match.score());
-                })
-                .collect(Collectors.toList());
-
+            List<SourceReference> sources = toSourceReferences(matches);
             return new RagResponse(answer, conversationId, sources);
         } catch (Exception e) {
             log.error("RAG 处理失败", e);
             throw new RuntimeException("问题处理失败: " + e.getMessage(), e);
         }
+    }
+
+    public SseEmitter askStream(RagRequest request) {
+        if (request.question() == null || request.question().trim().isEmpty()) {
+            throw new IllegalArgumentException("问题不能为空");
+        }
+
+        String conversationId = resolveConversationIdForStream(request.conversationId());
+        cancelGenerationInternal(conversationId, "同会话新请求到达，取消旧请求");
+
+        SseEmitter emitter = new SseEmitter(streamTimeoutMs);
+        InFlightGeneration generation = new InFlightGeneration(
+            UUID.randomUUID().toString(),
+            conversationId,
+            request.question(),
+            emitter
+        );
+        inFlightGenerations.put(conversationId, generation);
+
+        emitter.onCompletion(() -> {
+            cleanupGeneration(generation);
+            log.debug("SSE 连接完成: conversationId={}, requestId={}", conversationId, generation.requestId());
+        });
+        emitter.onTimeout(() -> {
+            log.warn("SSE 连接超时: conversationId={}, requestId={}", conversationId, generation.requestId());
+            generation.markCancelled();
+            generation.cancelHandle();
+            sendEvent(generation, "cancelled", Map.of("conversationId", conversationId, "reason", "timeout"));
+            completeGeneration(generation);
+        });
+        emitter.onError(error -> {
+            log.warn("SSE 连接错误: conversationId={}, requestId={}, error={}",
+                conversationId, generation.requestId(), error == null ? "unknown" : error.getMessage());
+            generation.markCancelled();
+            generation.cancelHandle();
+            completeGeneration(generation);
+        });
+
+        sendEvent(generation, "start", Map.of("conversationId", conversationId));
+
+        CompletableFuture.runAsync(() -> processStreamRequest(request, generation));
+        return emitter;
+    }
+
+    private void processStreamRequest(RagRequest request, InFlightGeneration generation) {
+        String conversationId = generation.conversationId();
+
+        try {
+            if (shouldAbort(generation)) {
+                return;
+            }
+
+            List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
+                .getRecentMessages(conversationId);
+            String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            if (shouldAbort(generation)) {
+                return;
+            }
+
+            var questionEmbedding = embeddingModel.embed(rewrittenQuestion).content();
+            if (shouldAbort(generation)) {
+                return;
+            }
+
+            EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                .queryEmbedding(questionEmbedding)
+                .maxResults(request.maxResults() != null ? request.maxResults() : maxResults)
+                .minScore(minScore)
+                .build();
+
+            log.info("流式问题向量维度: conversationId={}, dimension={}", conversationId, questionEmbedding.dimension());
+
+            EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
+            List<EmbeddingMatch<TextSegment>> matches = searchResult.matches();
+            List<SourceReference> sources = toSourceReferences(matches);
+            sendEvent(generation, "sources", sources);
+            if (shouldAbort(generation)) {
+                return;
+            }
+
+            log.info("流式检索完成: conversationId={}, matches={}, minScore={}", conversationId, matches.size(), minScore);
+
+            if (matches.isEmpty()) {
+                sendEvent(generation, "delta", EMPTY_MATCH_ANSWER);
+                conversationMemoryService.appendUserMessage(conversationId, request.question());
+                conversationMemoryService.appendAssistantMessage(conversationId, EMPTY_MATCH_ANSWER);
+                sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", false));
+                completeGeneration(generation);
+                return;
+            }
+
+            String context = matches.stream()
+                .map(match -> match.embedded().text())
+                .collect(Collectors.joining("\n\n---\n\n"));
+            String prompt = buildPrompt(history, context, request.question());
+            streamingChatModel.chat(prompt, new RagStreamingResponseHandler(generation, conversationId));
+        } catch (Exception e) {
+            if (generation.isCancelled() || generation.isCompleted()) {
+                completeGeneration(generation);
+                return;
+            }
+            log.error("流式 RAG 处理失败: conversationId={}", conversationId, e);
+            sendEvent(generation, "error", Map.of("message", safeErrorMessage(e)));
+            completeWithError(generation, e);
+        }
+    }
+
+    public boolean cancelGeneration(String conversationId) {
+        String normalizedConversationId = normalizeConversationId(conversationId);
+        if (!StringUtils.hasText(normalizedConversationId)) {
+            return false;
+        }
+        return cancelGenerationInternal(normalizedConversationId, "用户主动取消");
+    }
+
+    private boolean cancelGenerationInternal(String conversationId, String reason) {
+        InFlightGeneration generation = inFlightGenerations.get(conversationId);
+        if (generation == null) {
+            return false;
+        }
+        if (!generation.markCancelled()) {
+            return false;
+        }
+
+        log.info("取消流式生成: conversationId={}, requestId={}, reason={}", conversationId, generation.requestId(), reason);
+        generation.cancelHandle();
+        sendEvent(generation, "cancelled", Map.of("conversationId", conversationId, "reason", reason));
+        completeGeneration(generation);
+        return true;
+    }
+
+    private void completeGeneration(InFlightGeneration generation) {
+        if (!generation.markCompleted()) {
+            return;
+        }
+        cleanupGeneration(generation);
+        try {
+            generation.emitter().complete();
+        } catch (Exception e) {
+            log.debug("结束 SSE 连接时忽略异常: conversationId={}, requestId={}, message={}",
+                generation.conversationId(), generation.requestId(), e.getMessage());
+        }
+    }
+
+    private void completeWithError(InFlightGeneration generation, Throwable error) {
+        if (!generation.markCompleted()) {
+            return;
+        }
+        cleanupGeneration(generation);
+        try {
+            generation.emitter().completeWithError(error);
+        } catch (Exception e) {
+            log.debug("结束异常 SSE 连接时忽略异常: conversationId={}, requestId={}, message={}",
+                generation.conversationId(), generation.requestId(), e.getMessage());
+        }
+    }
+
+    private void cleanupGeneration(InFlightGeneration generation) {
+        inFlightGenerations.compute(generation.conversationId(), (conversationId, current) -> {
+            if (current == null) {
+                return null;
+            }
+            return generation.requestId().equals(current.requestId()) ? null : current;
+        });
+    }
+
+    private void sendEvent(InFlightGeneration generation, String eventName, Object data) {
+        if (generation.isCompleted()) {
+            return;
+        }
+        try {
+            generation.emitter().send(SseEmitter.event().name(eventName).data(data));
+        } catch (IOException e) {
+            log.warn("发送 SSE 事件失败: conversationId={}, requestId={}, event={}",
+                generation.conversationId(), generation.requestId(), eventName);
+            generation.markCancelled();
+            generation.cancelHandle();
+            completeGeneration(generation);
+        }
+    }
+
+    private boolean shouldAbort(InFlightGeneration generation) {
+        return generation.isCancelled()
+            || generation.isCompleted()
+            || inFlightGenerations.get(generation.conversationId()) != generation;
     }
 
     private String rewriteQuestion(String question, List<ConversationMemoryService.ConversationMessage> history) {
@@ -160,5 +362,197 @@ public class RagService {
             .map(message -> (message.role() == ConversationMemoryService.ConversationRole.USER ? "用户：" : "助手：")
                 + message.content())
             .collect(Collectors.joining("\n"));
+    }
+
+    private List<SourceReference> toSourceReferences(List<EmbeddingMatch<TextSegment>> matches) {
+        return matches.stream()
+            .map(match -> {
+                TextSegment segment = match.embedded();
+                String filename = segment.metadata() != null
+                    ? segment.metadata().getString("filename")
+                    : "unknown";
+                return new SourceReference(filename, segment.text(), match.score());
+            })
+            .collect(Collectors.toList());
+    }
+
+    private String resolveConversationIdForStream(String conversationId) {
+        String normalized = normalizeConversationId(conversationId);
+        if (StringUtils.hasText(normalized)) {
+            return normalized;
+        }
+        return "rag-" + UUID.randomUUID();
+    }
+
+    private String normalizeConversationId(String conversationId) {
+        if (!StringUtils.hasText(conversationId)) {
+            return null;
+        }
+        return conversationId.trim();
+    }
+
+    private String safeErrorMessage(Throwable error) {
+        if (error == null || !StringUtils.hasText(error.getMessage())) {
+            return "未知错误";
+        }
+        return error.getMessage();
+    }
+
+    private final class RagStreamingResponseHandler implements StreamingChatResponseHandler {
+
+        private final InFlightGeneration generation;
+        private final String conversationId;
+
+        private RagStreamingResponseHandler(InFlightGeneration generation, String conversationId) {
+            this.generation = generation;
+            this.conversationId = conversationId;
+        }
+
+        @Override
+        public void onPartialResponse(String partialResponse) {
+            handlePartialText(partialResponse);
+        }
+
+        @Override
+        public void onPartialResponse(PartialResponse partialResponse, PartialResponseContext context) {
+            if (context != null) {
+                generation.captureHandle(context.streamingHandle());
+            }
+            if (partialResponse != null) {
+                handlePartialText(partialResponse.text());
+            }
+        }
+
+        @Override
+        public void onCompleteResponse(ChatResponse response) {
+            if (generation.isCompleted()) {
+                return;
+            }
+
+            String finalAnswer = generation.answer();
+            if (response != null && response.aiMessage() != null && StringUtils.hasText(response.aiMessage().text())) {
+                finalAnswer = response.aiMessage().text();
+            }
+
+            if (!generation.isCancelled()) {
+                if (StringUtils.hasText(finalAnswer)) {
+                    conversationMemoryService.appendUserMessage(conversationId, generation.question());
+                    conversationMemoryService.appendAssistantMessage(conversationId, finalAnswer);
+                }
+                sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", false));
+            } else {
+                sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", true));
+            }
+            completeGeneration(generation);
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            if (generation.isCancelled()) {
+                sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", true));
+                completeGeneration(generation);
+                return;
+            }
+
+            log.error("流式模型响应失败: conversationId={}, requestId={}", conversationId, generation.requestId(), error);
+            sendEvent(generation, "error", Map.of("message", safeErrorMessage(error)));
+            completeWithError(generation, error);
+        }
+
+        private void handlePartialText(String text) {
+            if (!StringUtils.hasText(text) || generation.isCancelled() || generation.isCompleted()) {
+                return;
+            }
+            generation.appendAnswer(text);
+            sendEvent(generation, "delta", text);
+        }
+    }
+
+    private static final class InFlightGeneration {
+        private final String requestId;
+        private final String conversationId;
+        private final String question;
+        private final SseEmitter emitter;
+        private final AtomicReference<StreamingHandle> handleRef = new AtomicReference<>();
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
+        private final AtomicBoolean completed = new AtomicBoolean(false);
+        private final StringBuilder answerBuilder = new StringBuilder();
+
+        private InFlightGeneration(String requestId, String conversationId, String question, SseEmitter emitter) {
+            this.requestId = requestId;
+            this.conversationId = conversationId;
+            this.question = question;
+            this.emitter = emitter;
+        }
+
+        private String requestId() {
+            return requestId;
+        }
+
+        private String conversationId() {
+            return conversationId;
+        }
+
+        private String question() {
+            return question;
+        }
+
+        private SseEmitter emitter() {
+            return emitter;
+        }
+
+        private void captureHandle(StreamingHandle handle) {
+            if (handle == null) {
+                return;
+            }
+
+            StreamingHandle previous = handleRef.getAndSet(handle);
+            if (previous != null && previous != handle && !previous.isCancelled()) {
+                previous.cancel();
+            }
+
+            if (isCancelled() || isCompleted()) {
+                handle.cancel();
+            }
+        }
+
+        private void cancelHandle() {
+            StreamingHandle handle = handleRef.get();
+            if (handle == null) {
+                return;
+            }
+            try {
+                handle.cancel();
+            } catch (Exception ignored) {
+            }
+        }
+
+        private boolean markCancelled() {
+            return cancelled.compareAndSet(false, true);
+        }
+
+        private boolean isCancelled() {
+            return cancelled.get();
+        }
+
+        private boolean markCompleted() {
+            return completed.compareAndSet(false, true);
+        }
+
+        private boolean isCompleted() {
+            return completed.get();
+        }
+
+        private void appendAnswer(String text) {
+            synchronized (answerBuilder) {
+                answerBuilder.append(text);
+            }
+        }
+
+        private String answer() {
+            synchronized (answerBuilder) {
+                return answerBuilder.toString();
+            }
+        }
     }
 }
