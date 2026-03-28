@@ -55,6 +55,10 @@ public class EmbeddingService {
     public int storeSegments(List<TextSegment> segments) {
         long startTime = System.currentTimeMillis();
 
+        if (segments == null || segments.isEmpty()) {
+            throw new IllegalArgumentException("没有可存储的文本块，可能已被短文本或重复文本过滤");
+        }
+
         log.info("==========================================");
         log.info("嵌入向量存储开始");
         log.info("  待处理文本块总数: {}", segments.size());

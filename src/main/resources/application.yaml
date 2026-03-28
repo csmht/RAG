@@ -14,7 +14,7 @@ llm:
   ollama:
     base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
     chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
-    embedding-model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+    embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh}
     think: ${OLLAMA_THINK:false}
   vllm:
     base-url: ${VLLM_BASE_URL:http://localhost:8000/v1}
@@ -31,8 +31,12 @@ qdrant:
   create-collection-if-not-exists: ${QDRANT_CREATE_COLLECTION_IF_NOT_EXISTS:true}
 
 rag:
-  chunk-size: ${RAG_CHUNK_SIZE:500}
-  chunk-overlap: ${RAG_CHUNK_OVERLAP:50}
+  chunk-size: ${RAG_CHUNK_SIZE:320}
+  chunk-min-size: ${RAG_CHUNK_MIN_SIZE:250}
+  chunk-max-size: ${RAG_CHUNK_MAX_SIZE:350}
+  chunk-overlap: ${RAG_CHUNK_OVERLAP:40}
+  min-text-length: ${RAG_MIN_TEXT_LENGTH:80}
+  keyword-count: ${RAG_KEYWORD_COUNT:6}
   max-results: ${RAG_MAX_RESULTS:5}
   min-score: ${RAG_MIN_SCORE:0.5}
   memory-window: ${RAG_MEMORY_WINDOW:6}

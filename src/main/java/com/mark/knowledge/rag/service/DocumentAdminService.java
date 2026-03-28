@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.http.codec.ClientCodecConfigurer;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
@@ -25,6 +26,8 @@ import java.util.Objects;
 public class DocumentAdminService {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentAdminService.class);
+    private static final int SCROLL_PAGE_SIZE = 64;
+    private static final int WEBCLIENT_MAX_IN_MEMORY_SIZE = 2 * 1024 * 1024;
 
     private final String collectionName;
     private final WebClient webClient;
@@ -35,6 +38,7 @@ public class DocumentAdminService {
             @Value("${qdrant.collection-name:knowledge-base}") String collectionName) {
         this.collectionName = collectionName;
         this.webClient = WebClient.builder()
+            .codecs(this::configureCodecs)
             .baseUrl(String.format("http://%s:%d", qdrantHost, qdrantHttpPort))
             .build();
     }
@@ -104,8 +108,8 @@ public class DocumentAdminService {
 
         do {
             Map<String, Object> requestBody = new LinkedHashMap<>();
-            requestBody.put("limit", 256);
-            requestBody.put("with_payload", true);
+            requestBody.put("limit", SCROLL_PAGE_SIZE);
+            requestBody.put("with_payload", List.of("documentId", "filename", "metadata"));
             requestBody.put("with_vector", false);
             if (nextOffset != null) {
                 requestBody.put("offset", nextOffset);
@@ -129,6 +133,10 @@ public class DocumentAdminService {
         } while (nextOffset != null);
 
         return points;
+    }
+
+    private void configureCodecs(ClientCodecConfigurer configurer) {
+        configurer.defaultCodecs().maxInMemorySize(WEBCLIENT_MAX_IN_MEMORY_SIZE);
     }
 
     private String extractDocumentId(Map<String, Object> payload) {
