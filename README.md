@@ -127,63 +127,65 @@ open http://localhost:8080
 
 ## 🔌 API 接口
 
-### 1. 智能问答（流式）
+当前代码中的实际接口已整理为 OpenAPI 文档：
+
+- [OpenAPI 规范](docs/openapi.yaml)
+
+### 文档管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/documents/upload` | 上传并处理 PDF/TXT 文档 |
+| `GET` | `/api/documents` | 查询已上传文档列表 |
+| `DELETE` | `/api/documents/{documentId}` | 删除指定文档 |
+| `GET` | `/api/documents/health` | 文档服务健康检查 |
 
 ```bash
-curl -X POST http://localhost:8080/api/chat/stream \
-  -H "Content-Type: application/json" \
-  -d '{"question": "什么是AI？"}'
+curl -X POST http://localhost:8080/api/documents/upload \
+  -F "file=@document.txt"
+
+curl http://localhost:8080/api/documents
+
+curl -X DELETE http://localhost:8080/api/documents/{documentId}
 ```
 
-### 2. 智能体对话（流式）
+### RAG 问答
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/rag/ask` | 同步返回答案和来源片段 |
+| `POST` | `/api/rag/ask/stream` | 通过 SSE 流式返回答案 |
+| `POST` | `/api/rag/conversations/{conversationId}/cancel` | 取消指定会话的进行中生成任务 |
+| `DELETE` | `/api/rag/conversations/{conversationId}` | 清空指定会话上下文 |
+| `GET` | `/api/rag/health` | RAG 服务健康检查 |
 
 ```bash
-curl -X POST http://localhost:8080/api/agent-chat/stream \
+curl -X POST http://localhost:8080/api/rag/ask \
   -H "Content-Type: application/json" \
   -d '{
-    "message": "计算1+1等于多少"
+    "question": "什么是 RAG？",
+    "conversationId": "demo-001",
+    "maxResults": 5
+  }'
+
+curl -N -X POST http://localhost:8080/api/rag/ask/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "请总结上传文档的重点",
+    "conversationId": "demo-stream-001"
   }'
 ```
 
-### 3. 文件上传
+### 流式接口事件
 
-```bash
-# 上传文件
-curl -X POST http://localhost:8080/api/agent-files/upload \
-  -F "file=@document.txt" \
-  -F "conversationId=optional-conversation-id"
+`/api/rag/ask/stream` 会输出以下 SSE 事件：
 
-# 获取文件列表
-curl http://localhost:8080/api/agent-files/files/{conversationId}
-
-# 读取文件内容
-curl http://localhost:8080/api/agent-files/files/{conversationId}/{fileName}
-```
-
-### 4. 对话管理
-
-```bash
-# 获取对话历史
-curl http://localhost:8080/api/agent-chat/history/{conversationId}
-
-# 获取所有会话
-curl http://localhost:8080/api/agent-chat/conversations
-
-# 删除会话
-curl -X DELETE http://localhost:8080/api/agent-chat/conversations/{conversationId}
-```
-
-### 5. 领域文档上传
-
-```bash
-curl -X POST http://localhost:8080/api/domain/upload \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "TECHNOLOGY",
-    "title": "AI基础",
-    "content": "..."
-  }'
-```
+- `start`：返回会话 ID
+- `sources`：返回来源片段数组
+- `delta`：返回增量文本
+- `complete`：返回结束状态
+- `cancelled`：返回取消原因
+- `error`：返回错误信息
 
 ---
 
