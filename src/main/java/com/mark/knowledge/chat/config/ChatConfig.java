@@ -43,7 +43,7 @@ public class ChatConfig {
     @Value("${llm.ollama.chat-model:qwen2.5:7b}")
     private String ollamaChatModelName;
 
-    @Value("${llm.ollama.embedding-model:nomic-embed-text}")
+    @Value("${llm.ollama.embedding-model:bge-base-zh}")
     private String ollamaEmbeddingModelName;
 
     @Value("${llm.ollama.think:${ollama.think:false}}")
