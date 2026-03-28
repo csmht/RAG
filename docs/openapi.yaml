@@ -1,0 +1,486 @@
+openapi: 3.0.3
+info:
+  title: Knowledge RAG API
+  version: 1.0.0
+  description: |
+    基于当前代码实现整理的接口规范，覆盖文档上传管理与 RAG 问答全部公开 HTTP 接口。
+
+    说明：
+    - `/api/rag/ask` 为同步问答；如果未传 `conversationId`，响应中的 `conversationId` 也会为空。
+    - `/api/rag/ask/stream` 为 SSE 流式问答；如果未传 `conversationId`，服务端会自动生成 `rag-<uuid>`。
+    - 流式接口的业务错误通常会以 SSE `error` 事件返回，而不是中途切换为 HTTP 500。
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Documents
+    description: 文档上传、列表查询、删除和健康检查
+  - name: RAG
+    description: 同步问答、流式问答、会话控制和健康检查
+paths:
+  /api/documents/upload:
+    post:
+      tags:
+        - Documents
+      summary: 上传并处理文档
+      description: |
+        上传 `PDF` 或 `TXT` 文件，服务端会解析文本、切块、生成向量并写入知识库。
+      operationId: uploadDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 仅支持 `.pdf` 和 `.txt`
+      responses:
+        '200':
+          description: 文档处理成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+              example:
+                documentId: 6f8b83e5-ec3d-4d50-92b1-740d441e31e8
+                filename: company-policy.pdf
+                message: 文档处理成功
+                segmentCount: 18
+        '400':
+          description: 文件为空、文件名缺失或文件格式不支持
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                emptyFile:
+                  summary: 空文件
+                  value:
+                    error: 无效文件
+                    message: 文件为空
+                    timestamp: '2026-03-28T18:00:00'
+                invalidType:
+                  summary: 不支持的类型
+                  value:
+                    error: 不支持的文件类型
+                    message: 仅支持 PDF 和 TXT 文件
+                    timestamp: '2026-03-28T18:00:00'
+        '500':
+          description: 文档解析、切块或向量入库失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/documents:
+    get:
+      tags:
+        - Documents
+      summary: 获取已上传文档列表
+      operationId: listDocuments
+      responses:
+        '200':
+          description: 文档列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+              example:
+                documents:
+                  - documentId: 6f8b83e5-ec3d-4d50-92b1-740d441e31e8
+                    filename: company-policy.pdf
+                    segmentCount: 18
+                  - documentId: 2a0af035-d3d8-4edf-844a-2c4a00db1d2f
+                    filename: faq.txt
+                    segmentCount: 5
+                total: 2
+        '500':
+          description: 查询失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/documents/{documentId}:
+    delete:
+      tags:
+        - Documents
+      summary: 删除指定文档
+      operationId: deleteDocument
+      parameters:
+        - $ref: '#/components/parameters/DocumentId'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentDeleteResponse'
+              example:
+                documentId: 6f8b83e5-ec3d-4d50-92b1-740d441e31e8
+                deletedSegments: 18
+                message: 文档删除成功
+        '404':
+          description: 未找到对应文档
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 未找到文档
+                message: 未找到 documentId=6f8b83e5-ec3d-4d50-92b1-740d441e31e8 对应的知识文档
+                timestamp: '2026-03-28T18:00:00'
+        '500':
+          description: 删除失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/documents/health:
+    get:
+      tags:
+        - Documents
+      summary: 文档服务健康检查
+      operationId: documentHealth
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: 文档服务运行正常
+  /api/rag/ask:
+    post:
+      tags:
+        - RAG
+      summary: 同步 RAG 问答
+      description: |
+        同步返回最终答案与来源片段。
+
+        注意：
+        - `conversationId` 可选。
+        - 如果未传 `conversationId`，服务不会自动生成会话 ID，响应中的 `conversationId` 也会是 `null`。
+        - `maxResults` 的最终生效值不会超过服务端配置 `rag.max-results`。
+      operationId: askRag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RagRequest'
+            example:
+              question: 信访受理流程是什么？
+              conversationId: case-001
+              maxResults: 5
+      responses:
+        '200':
+          description: 问答成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RagResponse'
+              example:
+                answer: 根据信访办理制度，受理流程一般包括登记、初审、分流、办理和反馈五个阶段。
+                conversationId: case-001
+                sources:
+                  - filename: petition-policy.txt
+                    excerpt: 【标题：信访办理制度】受理流程包括登记、初审、分流、办理和反馈。
+                    relevanceScore: 0.91
+        '400':
+          description: 请求无效，例如问题为空
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 无效请求
+                message: 问题不能为空
+                timestamp: '2026-03-28T18:00:00'
+        '500':
+          description: 问答处理失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/rag/ask/stream:
+    post:
+      tags:
+        - RAG
+      summary: 流式 RAG 问答
+      description: |
+        使用 `text/event-stream` 持续推送回答过程。
+
+        典型事件顺序：
+        - `start`: 返回会话 ID。
+        - `sources`: 返回检索命中的来源片段数组。
+        - `delta`: 按 token/文本片段增量返回答案。
+        - `complete`: 结束事件，包含 `conversationId` 与 `cancelled`。
+        - `cancelled`: 会话被新请求替换、超时或主动取消时触发。
+        - `error`: 处理失败时推送错误信息。
+
+        注意：
+        - 如果未传 `conversationId`，服务端会自动生成 `rag-<uuid>`。
+        - 建议客户端优先消费 SSE 事件，而不是只依赖 HTTP 状态码。
+      operationId: askRagStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RagRequest'
+            example:
+              question: 帮我总结一下上传文档的核心要求
+              conversationId: stream-001
+              maxResults: 3
+      responses:
+        '200':
+          description: SSE 事件流
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                event: start
+                data: {"conversationId":"stream-001"}
+
+                event: sources
+                data: [{"filename":"guide.txt","excerpt":"【标题：办理指南】...","relevanceScore":0.88}]
+
+                event: delta
+                data: 核心要求包括材料完整、
+
+                event: delta
+                data: 事实清晰、时限明确。
+
+                event: complete
+                data: {"conversationId":"stream-001","cancelled":false}
+        '400':
+          description: 请求无效，例如问题为空
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 建流前即失败时返回；建流后的错误通常以 SSE `error` 事件推送
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/rag/conversations/{conversationId}/cancel:
+    post:
+      tags:
+        - RAG
+      summary: 取消指定会话的进行中生成任务
+      operationId: cancelConversationGeneration
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 取消成功
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: 已取消该会话的进行中生成任务
+        '404':
+          description: 当前会话没有进行中的生成任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: 未找到任务
+                message: 该会话当前没有进行中的生成任务
+                timestamp: '2026-03-28T18:00:00'
+  /api/rag/conversations/{conversationId}:
+    delete:
+      tags:
+        - RAG
+      summary: 清空指定会话上下文
+      description: 先取消可能存在的流式生成，再清空内存中的会话历史。
+      operationId: clearConversation
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      responses:
+        '200':
+          description: 清理成功
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: 会话上下文已清空
+  /api/rag/health:
+    get:
+      tags:
+        - RAG
+      summary: RAG 服务健康检查
+      operationId: ragHealth
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: RAG 服务运行正常
+components:
+  parameters:
+    DocumentId:
+      name: documentId
+      in: path
+      required: true
+      description: 文档唯一标识
+      schema:
+        type: string
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      description: 会话唯一标识
+      schema:
+        type: string
+  schemas:
+    RagRequest:
+      type: object
+      required:
+        - question
+      properties:
+        question:
+          type: string
+          description: 用户问题，不能为空
+          minLength: 1
+        conversationId:
+          type: string
+          nullable: true
+          description: |
+            会话 ID。
+            同步接口中可为空且不会自动生成；
+            流式接口中为空时会由服务端生成。
+        maxResults:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: 期望返回的来源片段数量，最终不会超过服务端配置上限
+    RagResponse:
+      type: object
+      required:
+        - answer
+        - sources
+      properties:
+        answer:
+          type: string
+          description: 最终答案
+        conversationId:
+          type: string
+          nullable: true
+          description: 会话 ID；同步问答在未传入时可能为空
+        sources:
+          type: array
+          description: 参与生成的来源片段
+          items:
+            $ref: '#/components/schemas/SourceReference'
+    SourceReference:
+      type: object
+      required:
+        - filename
+        - excerpt
+        - relevanceScore
+      properties:
+        filename:
+          type: string
+          description: 来源文件名
+        excerpt:
+          type: string
+          description: 命中的文本片段
+        relevanceScore:
+          type: number
+          format: double
+          description: 混合重排后的相关度分数
+    DocumentResponse:
+      type: object
+      required:
+        - filename
+        - message
+        - segmentCount
+      properties:
+        documentId:
+          type: string
+          nullable: true
+          description: 文档 ID
+        filename:
+          type: string
+          nullable: true
+          description: 原始文件名
+        message:
+          type: string
+          description: 处理结果消息
+        segmentCount:
+          type: integer
+          format: int32
+          minimum: 0
+          description: 入库的文本片段数量
+    DocumentListResponse:
+      type: object
+      required:
+        - documents
+        - total
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentListItemResponse'
+        total:
+          type: integer
+          format: int32
+          minimum: 0
+    DocumentListItemResponse:
+      type: object
+      required:
+        - documentId
+        - filename
+        - segmentCount
+      properties:
+        documentId:
+          type: string
+        filename:
+          type: string
+        segmentCount:
+          type: integer
+          format: int32
+          minimum: 0
+    DocumentDeleteResponse:
+      type: object
+      required:
+        - documentId
+        - deletedSegments
+        - message
+      properties:
+        documentId:
+          type: string
+        deletedSegments:
+          type: integer
+          format: int32
+          minimum: 0
+        message:
+          type: string
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - timestamp
+      properties:
+        error:
+          type: string
+          description: 错误标题
+        message:
+          type: string
+          description: 详细错误信息
+        timestamp:
+          type: string
+          format: date-time
+          description: 错误发生时间

@@ -2,11 +2,14 @@ package com.mark.knowledge.chat.config;
 
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.ollama.OllamaChatModel;
 import dev.langchain4j.model.ollama.OllamaEmbeddingModel;
+import dev.langchain4j.model.ollama.OllamaStreamingChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.qdrant.QdrantEmbeddingStore;
 import org.slf4j.Logger;
@@ -97,6 +100,16 @@ public class ChatConfig {
     }
 
     @Bean
+    public StreamingChatModel streamingChatModel() {
+        Duration timeout = parseTimeout(llmTimeout);
+        return switch (normalizedProvider()) {
+            case "ollama" -> createOllamaStreamingChatModel(timeout);
+            case "vllm" -> createVllmStreamingChatModel(timeout);
+            default -> throw unsupportedProvider();
+        };
+    }
+
+    @Bean
     public EmbeddingStore<TextSegment> embeddingStore() {
         log.info("初始化 Qdrant 向量存储: {}:{} / {} / {}", qdrantHost, qdrantPort, collectionName, vectorSize);
         return QdrantEmbeddingStore.builder()
@@ -128,10 +141,36 @@ public class ChatConfig {
                 .build();
     }
 
+    private StreamingChatModel createOllamaStreamingChatModel(Duration timeout) {
+        String resolvedModelName = resolveOllamaChatModelName();
+        log.info("初始化流式聊天模型: provider=ollama, baseUrl={}, model={}, think={}", ollamaBaseUrl, resolvedModelName, ollamaThink);
+        return OllamaStreamingChatModel.builder()
+                .baseUrl(ollamaBaseUrl)
+                .modelName(resolvedModelName)
+                .temperature(0.7)
+                .think(Boolean.TRUE.equals(ollamaThink))
+                .timeout(timeout)
+                .build();
+    }
+
     private ChatModel createVllmChatModel(Duration timeout) {
         String resolvedModelName = resolveVllmChatModelName();
         log.info("初始化聊天模型: provider=vllm, baseUrl={}, model={}", vllmBaseUrl, resolvedModelName);
         var builder = OpenAiChatModel.builder()
+                .baseUrl(vllmBaseUrl)
+                .modelName(resolvedModelName)
+                .temperature(0.7)
+                .timeout(timeout);
+        if (StringUtils.hasText(vllmApiKey)) {
+            builder.apiKey(vllmApiKey);
+        }
+        return builder.build();
+    }
+
+    private StreamingChatModel createVllmStreamingChatModel(Duration timeout) {
+        String resolvedModelName = resolveVllmChatModelName();
+        log.info("初始化流式聊天模型: provider=vllm, baseUrl={}, model={}", vllmBaseUrl, resolvedModelName);
+        var builder = OpenAiStreamingChatModel.builder()
                 .baseUrl(vllmBaseUrl)
                 .modelName(resolvedModelName)
                 .temperature(0.7)
