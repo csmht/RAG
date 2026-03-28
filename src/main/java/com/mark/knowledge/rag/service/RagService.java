@@ -57,7 +57,9 @@ public class RagService {
             List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
                 .getRecentMessages(conversationId);
             String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            long questionEmbeddingStart = System.nanoTime();
             var questionEmbedding = embeddingModel.embed(rewrittenQuestion).content();
+            log.info("获取问题向量耗时: {} ms", elapsedMillis(questionEmbeddingStart));
 
             EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(questionEmbedding)
@@ -88,7 +90,9 @@ public class RagService {
                 .collect(Collectors.joining("\n\n---\n\n"));
 
             String prompt = buildPrompt(history, context, request.question());
+            long answerStart = System.nanoTime();
             String answer = chatModel.chat(prompt);
+            log.info("AI 基于知识库生成答案耗时: {} ms", elapsedMillis(answerStart));
 
             conversationMemoryService.appendUserMessage(conversationId, request.question());
             conversationMemoryService.appendAssistantMessage(conversationId, answer);
@@ -108,6 +112,10 @@ public class RagService {
             log.error("RAG 处理失败", e);
             throw new RuntimeException("问题处理失败: " + e.getMessage(), e);
         }
+    }
+
+    private long elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000;
     }
 
     private String rewriteQuestion(String question, List<ConversationMemoryService.ConversationMessage> history) {
