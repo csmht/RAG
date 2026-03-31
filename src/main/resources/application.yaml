@@ -14,7 +14,7 @@ llm:
   ollama:
     base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
     chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
-    embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh}
+    embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh-v1.5}
     think: ${OLLAMA_THINK:false}
   vllm:
     base-url: ${VLLM_BASE_URL:http://localhost:8000/v1}
@@ -49,3 +49,14 @@ logging:
     root: ${LOG_LEVEL_ROOT:INFO}
     com.mark.knowledge: ${LOG_LEVEL_APP:DEBUG}
     dev.langchain4j: ${LOG_LEVEL_LANGCHAIN4J:DEBUG}
+    org.springframework.security: DEBUG
+
+app:
+  jwt:
+    secret: "mySecretKeyForJWTTokenGenerationWithEnoughLength1234567890"
+    expiration-ms: 86400000
+  users:
+    - username: admin
+      password: admin123
+      roles:
+        - ROLE_ADMIN

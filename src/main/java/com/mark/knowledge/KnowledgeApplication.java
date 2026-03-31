@@ -1,9 +1,11 @@
 package com.mark.knowledge;
 
+import com.mark.knowledge.auth.config.UserProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.io.IOException;
@@ -13,6 +15,7 @@ import java.util.List;
 
 @EnableScheduling
 @SpringBootApplication
+@EnableConfigurationProperties(UserProperties.class)
 public class KnowledgeApplication {
 
 	private static final Logger log = LoggerFactory.getLogger(KnowledgeApplication.class);
