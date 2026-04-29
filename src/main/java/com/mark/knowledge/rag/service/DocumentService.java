@@ -10,10 +10,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -39,8 +37,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * 文档服务 - 文档处理和分块
- *
+ * 文档服务 - 文档处理和分块*
  * 服务职责：
  * - 处理文档输入（解析、清洗、增强和分块）
  * - 支持多种格式（PDF、TXT）
@@ -179,6 +176,44 @@ public class DocumentService {
             log.error("  错误: {}", e.getMessage(), e);
             log.error("==========================================");
             throw new RuntimeException("文档处理失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 处理纯文本内容（用于多格式文件服务）
+     *
+     * @param textContent 文本内容
+     * @param filename 文件名
+     * @return 处理后的文本片段
+     */
+    public List<dev.langchain4j.data.segment.TextSegment> processDocumentContent(String textContent, String filename) {
+        if (textContent == null || textContent.trim().isEmpty()) {
+            return List.of();
+        }
+
+        try {
+            // 创建临时文本片段
+            List<TextSegment> segments = new ArrayList<>();
+            String documentId = UUID.randomUUID().toString();
+
+            // 简单的文本分块（可以根据需要改进）
+            String[] lines = textContent.split("\\n\\n+");
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i].trim();
+                if (line.length() >= minTextLength) {
+                    Metadata metadata = new Metadata();
+                    metadata.put("documentId", documentId);
+                    metadata.put("filename", filename);
+                    metadata.put("chunk_index", String.valueOf(i));
+
+                    segments.add(TextSegment.from(line, metadata));
+                }
+            }
+
+            return segments;
+        } catch (Exception e) {
+            log.error("处理文本内容失败", e);
+            return List.of();
         }
     }
 

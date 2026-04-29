@@ -7,6 +7,7 @@ import com.mark.knowledge.rag.service.ConversationMemoryService;
 import com.mark.knowledge.rag.service.RagService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -24,13 +25,10 @@ public class RagController {
 
     private static final Logger log = LoggerFactory.getLogger(RagController.class);
 
-    private final RagService ragService;
-    private final ConversationMemoryService conversationMemoryService;
-
-    public RagController(RagService ragService, ConversationMemoryService conversationMemoryService) {
-        this.ragService = ragService;
-        this.conversationMemoryService = conversationMemoryService;
-    }
+    @Autowired
+    private RagService ragService;
+    @Autowired
+    private ConversationMemoryService conversationMemoryService;
 
     /**
      * 使用 RAG 回答问题
