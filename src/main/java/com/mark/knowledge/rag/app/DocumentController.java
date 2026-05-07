@@ -1,7 +1,9 @@
 package com.mark.knowledge.rag.app;
 
 
-import com.mark.knowledge.rag.dto.*;
+import com.mark.knowledge.rag.dto.DocumentDeleteResponse;
+import com.mark.knowledge.rag.dto.DocumentResponse;
+import com.mark.knowledge.rag.dto.ErrorResponse;
 import com.mark.knowledge.rag.service.DocumentAdminService;
 import com.mark.knowledge.rag.service.DocumentService;
 import com.mark.knowledge.rag.service.EmbeddingService;
@@ -15,7 +17,6 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.InputStream;
-import java.util.List;
 import java.util.Locale;
 
 /**
@@ -93,54 +94,6 @@ public class DocumentController {
             log.error("文档处理失败", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse("处理失败", e.getMessage()));
-        }
-    }
-
-    /**
-     * 批量上传并处理文档
-     *
-     * @param files 文档文件数组（PDF 或 TXT 格式）
-     * @return 批量处理结果
-     */
-    @PostMapping(value = "/upload/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<?> uploadBatchDocuments(@RequestParam("files") MultipartFile[] files) {
-        log.info("收到批量文档上传请求: {} 个文件", files.length);
-
-        if (files.length == 0) {
-            return ResponseEntity.badRequest()
-                .body(new ErrorResponse("无效请求", "未提供文件"));
-        }
-
-        if (files.length > 50) {
-            return ResponseEntity.badRequest()
-                .body(new ErrorResponse("文件数量过多", "单次最多支持 50 个文件"));
-        }
-
-        try {
-            List<BatchProcessResult> processResults =
-                documentService.processBatchDocuments(files);
-
-            int successCount = (int) processResults.stream()
-                .filter(com.mark.knowledge.rag.dto.BatchProcessResult::success)
-                .count();
-            int failureCount = processResults.size() - successCount;
-
-            BatchUploadResponse response = new BatchUploadResponse(
-                files.length,
-                successCount,
-                failureCount,
-                processResults
-            );
-
-            log.info("批量文档处理完成: 成功 {}, 失败 {}", successCount, failureCount);
-
-            return ResponseEntity.ok(response);
-
-        } catch (Exception e) {
-            log.error("批量文档处理失败", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ErrorResponse("批量处理失败", e.getMessage()));
         }
     }
 

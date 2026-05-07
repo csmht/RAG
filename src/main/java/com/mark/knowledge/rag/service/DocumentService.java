@@ -9,10 +9,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.multipart.MultipartFile;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -86,90 +87,6 @@ public class DocumentService {
 
     @Value("${rag.keyword-count:6}")
     private int keywordCount;
-
-    /**
-     * 批量处理文档
-     *
-     * @param files 文档文件数组
-     * @return 批量处理结果列表
-     */
-    public List<com.mark.knowledge.rag.dto.BatchProcessResult> processBatchDocuments(MultipartFile[] files) {
-        List<com.mark.knowledge.rag.dto.BatchProcessResult> results = new ArrayList<>();
-        int successCount = 0;
-        int failureCount = 0;
-
-        log.info("==========================================");
-        log.info("批量文档处理开始");
-        log.info("  文件数量: {}", files.length);
-        log.info("==========================================");
-
-        for (int i = 0; i < files.length; i++) {
-            MultipartFile file = files[i];
-            String filename = file.getOriginalFilename();
-            log.info("\n[文件 {}/{}] 处理中: {}", i + 1, files.length, filename);
-
-            try {
-                if (file.isEmpty()) {
-                    results.add(com.mark.knowledge.rag.dto.BatchProcessResult.failure(
-                        filename != null ? filename : "unknown",
-                        "文件为空"
-                    ));
-                    failureCount++;
-                    log.warn("  ✗ 文件为空");
-                    continue;
-                }
-
-                if (filename == null || filename.isBlank()) {
-                    results.add(com.mark.knowledge.rag.dto.BatchProcessResult.failure(
-                        "unknown",
-                        "文件名缺失"
-                    ));
-                    failureCount++;
-                    log.warn("  ✗ 文件名缺失");
-                    continue;
-                }
-
-                String lowerFilename = filename.toLowerCase(Locale.ROOT);
-                if (!lowerFilename.endsWith(".pdf") && !lowerFilename.endsWith(".txt")) {
-                    results.add(com.mark.knowledge.rag.dto.BatchProcessResult.failure(
-                        filename,
-                        "不支持的文件类型，仅支持 PDF 和 TXT 文件"
-                    ));
-                    failureCount++;
-                    log.warn("  ✗ 不支持的文件类型: {}", filename);
-                    continue;
-                }
-
-                try (InputStream inputStream = file.getInputStream()) {
-                    ProcessedDocument processed = processDocument(inputStream, filename);
-                    results.add(com.mark.knowledge.rag.dto.BatchProcessResult.success(
-                        processed.documentId(),
-                        filename,
-                        processed.segments().size()
-                    ));
-                    successCount++;
-                    log.info("  ✓ 处理成功 ({} 个片段)", processed.segments().size());
-                }
-
-            } catch (Exception e) {
-                results.add(com.mark.knowledge.rag.dto.BatchProcessResult.failure(
-                    filename != null ? filename : "unknown",
-                    e.getMessage()
-                ));
-                failureCount++;
-                log.error("  ✗ 处理失败: {}", e.getMessage());
-            }
-        }
-
-        log.info("\n==========================================");
-        log.info("批量文档处理完成");
-        log.info("  总文件数: {}", files.length);
-        log.info("  成功: {}", successCount);
-        log.info("  失败: {}", failureCount);
-        log.info("==========================================");
-
-        return results;
-    }
 
     /**
      * 处理输入流中的文档
