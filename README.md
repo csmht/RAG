@@ -214,7 +214,7 @@ qdrant:
   host: localhost
   port: 6334
   collection-name: knowledge-base
-  vector-size: 1024
+  vector-size: 2056
   create-collection-if-not-exists: true
 
 # RAG 配置

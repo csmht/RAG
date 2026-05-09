@@ -4,6 +4,7 @@ import com.mark.knowledge.auth.common.Result;
 import com.mark.knowledge.rag.dto.BatchUploadDTO;
 import com.mark.knowledge.rag.dto.BatchUploadTaskStatusDTO;
 import com.mark.knowledge.rag.dto.DocumentDeleteResponse;
+import com.mark.knowledge.rag.dto.DocumentUploadResponse;
 import com.mark.knowledge.rag.dto.ErrorResponse;
 import com.mark.knowledge.rag.dto.ProcessedFileDTO;
 import com.mark.knowledge.rag.service.BatchUploadService;
@@ -57,11 +58,14 @@ public class DocumentController {
 
             if (result.getCode() == 1 && result.getData() != null && result.getData().isSuccess()) {
                 ProcessedFileDTO dto = result.getData();
-                Map<String, Object> response = new HashMap<>();
-                response.put("filename", dto.getOriginalFilename());
-                response.put("message", dto.getMessage());
-                response.put("embeddingCount", dto.getEmbeddingCount());
-                response.put("textContent", dto.getTextContent());
+                DocumentUploadResponse response = new DocumentUploadResponse(
+                    dto.getOriginalFilename(),
+                    dto.getMessage(),
+                    dto.getEmbeddingCount(),
+                    dto.getTextContent(),
+                    dto.getFilePath(),
+                    dto.isSuccess()
+                );
                 return ResponseEntity.ok(response);
             } else {
                 String errorMsg = result.getData() != null ? result.getData().getErrorMessage() : result.getMsg();
