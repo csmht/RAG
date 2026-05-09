@@ -1,15 +1,18 @@
 package com.mark.knowledge.rag.dto;
 
-import dev.langchain4j.data.segment.TextSegment;
+import lombok.Data;
 
 import java.util.List;
-import lombok.Data;
+import java.util.Map;
 
 @Data
 public class ProcessedFileDTO {
-    private final String originalFilename;
-    private final FileTypeDTO fileType;
-    private final String filePath;
-    private final ProcessedContentDTO processedContentDTO;
-    private final List<TextSegment> segments;
+    private String originalFilename;
+    private String filePath;
+    private boolean success;
+    private String message;
+    private String errorMessage;
+    private Integer embeddingCount;
+    private String textContent;
+    private Map<String, Object> metadata;
 }

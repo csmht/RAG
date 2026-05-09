@@ -1,7 +1,6 @@
 package com.mark.knowledge.rag.service.Impl;
 
-import com.mark.knowledge.rag.common.MultiFormatProcessResult;
-import com.mark.knowledge.rag.dto.FileTypeDTO;
+import com.mark.knowledge.auth.common.Result;
 import com.mark.knowledge.rag.dto.ProcessedContentDTO;
 import com.mark.knowledge.rag.dto.ProcessedFileDTO;
 import com.mark.knowledge.rag.entity.UploadedFileEntity;
@@ -15,6 +14,7 @@ import net.sourceforge.tess4j.Tesseract;
 import org.apache.poi.extractor.ExtractorFactory;
 import org.apache.poi.extractor.POITextExtractor;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.hwpf.HWPFDocument;
 import org.apache.poi.hwpf.extractor.WordExtractor;
 import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
@@ -28,8 +28,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -42,16 +44,17 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
 
     private static final Logger log = LoggerFactory.getLogger(MultiFormatDocumentServiceImpl.class);
 
-    // 支持的文件类型映射
     private static final Map<String, Set<String>> SUPPORTED_FORMATS = Map.of(
             "PDF", Set.of("pdf"),
             "TEXT", Set.of("txt", "md"),
-            "IMAGE", Set.of("jpg", "jpeg", "png", "bmp"),
-            "DOCUMENT", Set.of("doc", "docx", "xls", "xlsx", "ppt", "pptx")
+            "DOCUMENT", Set.of("doc", "docx")
     );
 
-    // 文件上传目录
-    private final Path uploadBaseDir = Paths.get("uploads");
+    private static final Set<String> STORE_ONLY_EXTENSIONS = Set.of(
+            "jpg", "jpeg", "png", "bmp", "xls", "xlsx", "ppt", "pptx"
+    );
+
+    private final Path uploadBaseDir;
 
     private final DocumentService documentService;
     private final EmbeddingService embeddingService;
@@ -60,76 +63,115 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
     public MultiFormatDocumentServiceImpl(DocumentService documentService,
                                       EmbeddingService embeddingService,
                                       UploadedFileRepository uploadedFileRepository) {
+        this.uploadBaseDir = Paths.get("uploads");
         this.documentService = documentService;
         this.embeddingService = embeddingService;
         this.uploadedFileRepository = uploadedFileRepository;
     }
 
-    /**
-     * 处理多格式文件上传
-     */
     @Transactional
     @Override
-    public MultiFormatProcessResult processMultiFormatFile(MultipartFile file, String userId) {
+    public Result<ProcessedFileDTO> processMultiFormatFile(MultipartFile file, String userId) {
         try {
             String originalFilename = file.getOriginalFilename();
             if (originalFilename == null || originalFilename.isBlank()) {
-                return new MultiFormatProcessResult(false, "文件名不能为空", null);
+                return Result.error("文件名不能为空");
             }
 
-            // 检测文件类型
-            FileTypeDTO fileType = detectFileType(originalFilename);
+            String extension = getFileExtension(originalFilename).toLowerCase();
+            boolean isStoreOnly = STORE_ONLY_EXTENSIONS.contains(extension);
+
+            String fileType = detectFileType(extension, isStoreOnly);
             if (fileType == null) {
-                return new MultiFormatProcessResult(false, "不支持的文件类型: " + originalFilename, null);
+                return Result.error("不支持的文件类型: " + originalFilename);
             }
 
-            // 保存原始文件
-            Path savedFilePath = saveOriginalFile(file, userId, fileType);
+            String contentType = getContentType(fileType);
+            Path savedFilePath = saveOriginalFile(file, userId, fileType, extension);
 
-            // 根据文件类型处理内容
-            ProcessedContentDTO processedContentDTO = processFileContent(file.getInputStream(), fileType, originalFilename);
+            ProcessedContentDTO processedContentDTO = processFileContent(
+                    file.getInputStream(), fileType, originalFilename, isStoreOnly);
 
-            // 如果处理成功且是文本内容，进行向量化
+            ProcessedFileDTO dto = new ProcessedFileDTO();
+            dto.setOriginalFilename(originalFilename);
+            dto.setFilePath(savedFilePath.toString());
+
             List<TextSegment> segments = null;
-            if (processedContentDTO.isSuccess() && processedContentDTO.getTextContent() != null) {
-                segments = documentService.processDocumentContent(processedContentDTO.getTextContent(), originalFilename);
-                int embeddingCount = embeddingService.storeSegments(segments);
+            int embeddingCount = 0;
+
+            if (!isStoreOnly && processedContentDTO.isSuccess() && processedContentDTO.getTextContent() != null
+                    && !processedContentDTO.getTextContent().trim().isEmpty()) {
+                String safeText = sanitizeTextBeforeEmbedding(processedContentDTO.getTextContent());
+                if (safeText == null || safeText.trim().isEmpty()) {
+                    log.warn("文本内容无效，跳过向量化: 文件={}", originalFilename);
+                    dto.setSuccess(false);
+                    dto.setMessage("文本内容处理后为空，跳过索引");
+                    dto.setEmbeddingCount(0);
+                    try {
+                        saveFileInfoToDatabase(userId, originalFilename, fileType, extension, savedFilePath, processedContentDTO, null, "FAILED");
+                    } catch (Exception e) {
+                        log.error("保存文件信息到数据库失败: 用户={}, 文件名={}", userId, originalFilename);
+                    }
+                    return Result.success(dto);
+                }
+                segments = documentService.processDocumentContent(safeText, originalFilename);
+                embeddingCount = embeddingService.storeSegments(segments);
                 processedContentDTO.setEmbeddingCount(embeddingCount);
             }
 
-            log.info("多格式文件处理成功: 类型={}, 用户={}, 文件名={}",
-                    fileType.getType(), userId, originalFilename);
+            log.info("文件处理完成: 类型={}, 用户={}, 文件名={}, 存储={}, 向量数={}",
+                    fileType, userId, originalFilename, isStoreOnly, embeddingCount);
 
-            // 保存文件信息到数据库
-            saveFileInfoToDatabase(userId, originalFilename, fileType, savedFilePath, processedContentDTO, segments);
+            dto.setSuccess(isStoreOnly || processedContentDTO.isSuccess());
+            dto.setMessage(isStoreOnly ? "文件已保存，不进行内容处理" : processedContentDTO.getMessage());
+            dto.setEmbeddingCount(embeddingCount > 0 ? embeddingCount : (processedContentDTO.getEmbeddingCount() != null ? processedContentDTO.getEmbeddingCount() : 0));
+            dto.setTextContent(processedContentDTO.getTextContent());
+            dto.setMetadata(processedContentDTO.getMetadata());
 
-            return new MultiFormatProcessResult(true, "文件处理成功",
-                    new ProcessedFileDTO(originalFilename, fileType, savedFilePath.toString(), processedContentDTO, segments));
+            if (isStoreOnly) {
+                log.info("非索引文件仅保存本地: 用户={}, 文件名={}, 路径={}",
+                        userId, originalFilename, savedFilePath);
+                return Result.success(dto);
+            }
+
+            try {
+                saveFileInfoToDatabase(userId, originalFilename, fileType, extension, savedFilePath, processedContentDTO, segments,
+                        "COMPLETED");
+            } catch (Exception e) {
+                log.error("保存文件信息到数据库失败（影响后续去重）: 用户={}, 文件名={}, 错误={}",
+                        userId, originalFilename, e.getMessage());
+                throw new IllegalStateException("文件元数据保存失败，请重试: " + originalFilename, e);
+            }
+
+            return Result.success(dto);
 
         } catch (Exception e) {
-            log.error("多格式文件处理失败", e);
-            return new MultiFormatProcessResult(false, "文件处理失败: " + e.getMessage(), null);
+            log.error("文件处理失败", e);
+            ProcessedFileDTO dto = new ProcessedFileDTO();
+            dto.setSuccess(false);
+            dto.setErrorMessage(e.getMessage());
+            return Result.success(dto);
         }
     }
     /**
      * 保存文件信息到数据库
      */
-    private void saveFileInfoToDatabase(String userId, String originalFilename, FileTypeDTO fileType,
-                                        Path savedFilePath, ProcessedContentDTO processedContentDTO,
-                                        List<TextSegment> segments) {
+    private void saveFileInfoToDatabase(String userId, String originalFilename, String fileType,
+                                        String extension, Path savedFilePath, ProcessedContentDTO processedContentDTO,
+                                        List<TextSegment> segments, String status) {
         try {
             UploadedFileEntity uploadedFile = new UploadedFileEntity();
             uploadedFile.setUserId(userId);
             uploadedFile.setFilename(savedFilePath.getFileName().toString());
             uploadedFile.setOriginalFilename(originalFilename);
-            uploadedFile.setFileType(fileType.getType());
+            uploadedFile.setFileType(fileType);
             uploadedFile.setFilePath(savedFilePath.toString());
             uploadedFile.setFileSize(Files.size(savedFilePath));
-            uploadedFile.setContentType(fileType.getContentType());
-            uploadedFile.setEmbeddingCount(segments != null ? segments.size() : processedContentDTO.getEmbeddingCount());
+            uploadedFile.setContentType(getContentType(fileType));
+            uploadedFile.setEmbeddingCount(segments != null ? segments.size() : (processedContentDTO.getEmbeddingCount() != null ? processedContentDTO.getEmbeddingCount() : 0));
             uploadedFile.setProcessedText(processedContentDTO.getTextContent());
             uploadedFile.setProcessedTime(LocalDateTime.now());
-            uploadedFile.setStatus("COMPLETED");
+            uploadedFile.setStatus(status);
             uploadedFile.setFileHash(calculateFileHashFromFile(savedFilePath));
 
             uploadedFileRepository.save(uploadedFile);
@@ -137,55 +179,42 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
             log.debug("文件信息已保存到数据库: 用户={}, 文件名={}", userId, originalFilename);
         } catch (Exception e) {
             log.error("保存文件信息到数据库失败: 用户={}, 文件名={}", userId, originalFilename, e);
+            throw new RuntimeException("文件元数据保存失败: " + e.getMessage(), e);
         }
     }
 
-    /**
-     * 检测文件类型
-     */
-    private FileTypeDTO detectFileType(String filename) {
-        String extension = getFileExtension(filename).toLowerCase();
-
+    private String detectFileType(String extension, boolean isStoreOnly) {
+        if (isStoreOnly) {
+            return "FILE";
+        }
         for (Map.Entry<String, Set<String>> entry : SUPPORTED_FORMATS.entrySet()) {
             if (entry.getValue().contains(extension)) {
-                return new FileTypeDTO(entry.getKey(), extension, getContentType(entry.getKey()));
+                return entry.getKey();
             }
         }
-
         return null;
     }
 
-    /**
-     * 保存原始文件
-     */
-    private Path saveOriginalFile(MultipartFile file, String userId, FileTypeDTO fileType) throws IOException {
-        // 创建用户目录
+    private Path saveOriginalFile(MultipartFile file, String userId, String fileType, String extension) throws IOException {
         Path userDir = uploadBaseDir.resolve(userId);
         Files.createDirectories(userDir);
-
-        // 生成唯一文件名
-        String uniqueFilename = generateUniqueFilename(fileType, file.getOriginalFilename());
+        String uniqueFilename = generateUniqueFilename(fileType, extension);
         Path filePath = userDir.resolve(uniqueFilename);
-
-        // 保存文件
         try (InputStream inputStream = file.getInputStream()) {
             Files.copy(inputStream, filePath, StandardCopyOption.REPLACE_EXISTING);
         }
-
         return filePath;
     }
 
-    /**
-     * 处理文件内容
-     */
-    private ProcessedContentDTO processFileContent(InputStream inputStream, FileTypeDTO fileType, String filename) {
+    private ProcessedContentDTO processFileContent(InputStream inputStream, String fileType, String filename, boolean isStoreOnly) {
+        if (isStoreOnly) {
+            return new ProcessedContentDTO(false, "仅保存文件，不进行内容处理", null, null);
+        }
         try {
-            return switch (fileType.getType()) {
+            return switch (fileType) {
                 case "PDF", "TEXT" -> processTextBasedFile(inputStream, filename);
-                case "IMAGE" -> processImageFile(inputStream);
                 case "DOCUMENT" -> processOfficeDocument(inputStream, filename);
                 default -> new ProcessedContentDTO(false, "未知文件类型", null, null);
-
             };
         } catch (Exception e) {
             log.error("文件内容处理失败", e);
@@ -193,54 +222,54 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
         }
     }
 
-    /**
-     * 处理文本类文件（PDF、TXT）
-     */
     private ProcessedContentDTO processTextBasedFile(InputStream inputStream, String filename) {
         try {
-            // 使用现有的DocumentService处理
             DocumentService.ProcessedDocument processed = documentService.processDocument(inputStream, filename);
-
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("processedAt", LocalDateTime.now());
             metadata.put("segmentCount", processed.segments().size());
-
-            // 提取文本内容（用于显示）
             String textContent = extractPreviewText(processed.segments());
-
             return new ProcessedContentDTO(true, "文本文件处理完成", textContent, metadata);
         } catch (Exception e) {
             return new ProcessedContentDTO(false, "文本文件处理失败: " + e.getMessage(), null, null);
         }
     }
 
-    /**
-     * 处理图片文件
-     */
-    private ProcessedContentDTO processImageFile(InputStream inputStream) {
-        // 集成OCR服务提取图片文字
-        String extractedText = extractTextFromImage(inputStream);
-
-        Map<String, Object> metadata = new HashMap<>();
-        metadata.put("processedAt", LocalDateTime.now());
-        metadata.put("contentType", "image");
-        metadata.put("ocrApplied", true);
-
-        return new ProcessedContentDTO(true, "图片处理完成", extractedText, metadata);
-    }
-
-    /**
-     * 处理Office文档
-     */
     private ProcessedContentDTO processOfficeDocument(InputStream inputStream, String filename) {
-        // 集成Office文档解析库
-        String extractedText = extractTextFromOfficeDocument(inputStream, filename);
+        String extractedText;
+        try {
+            extractedText = extractTextFromOfficeDocument(inputStream, filename);
+        } catch (Exception e) {
+            log.error("Office文档内容提取失败: 文件={}, 错误={}", filename, e.getMessage());
+            return new ProcessedContentDTO(false, "Office文档内容提取失败: " + e.getMessage(), null, null);
+        }
 
-        Map<String, Object> metadata = new HashMap<>();
-        metadata.put("processedAt", LocalDateTime.now());
-        metadata.put("contentType", "office");
+        if (extractedText.trim().isEmpty()) {
+            return new ProcessedContentDTO(false, "Office文档中未提取到文字内容", null, null);
+        }
 
-        return new ProcessedContentDTO(true, "Office文档处理完成", extractedText, metadata);
+        if (isOnlyWhitespaceOrGarbage(extractedText)) {
+            log.warn("Office文档内容无效或仅含垃圾字符: 文件={}", filename);
+            return new ProcessedContentDTO(false, "Office文档内容为空或无效", null, null);
+        }
+
+        try {
+            DocumentService.ProcessedDocument processed =
+                    documentService.processDocument(
+                            new ByteArrayInputStream(extractedText.getBytes(StandardCharsets.UTF_8)),
+                            filename + ".txt");
+
+            String textContent = extractPreviewText(processed.segments());
+
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("processedAt", LocalDateTime.now());
+            metadata.put("contentType", "office");
+            metadata.put("segmentCount", processed.segments().size());
+
+            return new ProcessedContentDTO(true, "Office文档处理完成", textContent, metadata);
+        } catch (Exception e) {
+            return new ProcessedContentDTO(false, "Office文档处理失败: " + e.getMessage(), null, null);
+        }
     }
 
     /**
@@ -248,33 +277,23 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
      */
     private String extractTextFromImage(InputStream inputStream) {
         try {
-            // 将输入流转为BufferedImage
             BufferedImage image = ImageIO.read(inputStream);
 
-            // 初始化Tesseract实例
             ITesseract tesseract = new Tesseract();
-
-            // 设置Tesseract数据文件路径（需要安装Tesseract并配置tessdata）
-            String tessDataPath = System.getProperty("user.dir") + "/tessdata"; // 默认路径
+            String tessDataPath = System.getProperty("user.dir") + "/tessdata";
             tesseract.setDatapath(tessDataPath);
-
-            // 设置语言（中文+英文）
             tesseract.setLanguage("chi_sim+eng");
 
-            // 执行OCR识别
             String extractedText = tesseract.doOCR(image);
 
-            // 清理提取的文本
             if (extractedText != null && !extractedText.trim().isEmpty()) {
                 return extractedText.trim();
             } else {
-                // 如果OCR没有提取到文字，返回一个描述性的文本
-                return "此图像文件中未检测到可读取的文字内容";
+                throw new IOException("图片中未检测到可读取的文字内容");
             }
-        } catch (Exception e) {
-            log.warn("OCR处理失败: {}", e.getMessage());
-            // 如果OCR失败，至少返回一个描述性文本
-            return "图像文件，OCR处理失败: " + e.getMessage();
+        } catch (IOException | net.sourceforge.tess4j.TesseractException e) {
+            log.warn("OCR提取文字失败: {}", e.getMessage());
+            throw new RuntimeException("图片文字提取失败: " + e.getMessage());
         }
     }
 
@@ -284,84 +303,81 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
     private String extractTextFromOfficeDocument(InputStream inputStream, String filename) {
         try {
             String extension = getFileExtension(filename).toLowerCase();
+            String text;
 
             switch (extension) {
                 case "doc":
-                    // 处理旧版Word文档(.doc)
                     try (POIFSFileSystem fs = new POIFSFileSystem(inputStream)) {
-                        HSSFWorkbook workbook = new HSSFWorkbook(fs);
-                        WordExtractor extractor = new WordExtractor(workbook.getDirectory());
-                        String text = extractor.getText();
+                        HWPFDocument document = new HWPFDocument(fs.getRoot());
+                        WordExtractor extractor = new WordExtractor(document);
+                        text = extractor.getText();
                         extractor.close();
-                        return text != null ? text : "";
+                        document.close();
+                        return text;
                     }
                 case "docx":
-                    // 处理新版Word文档(.docx)
                     try (XWPFDocument document = new XWPFDocument(inputStream)) {
                         XWPFWordExtractor extractor = new XWPFWordExtractor(document);
-                        String text = extractor.getText();
+                        text = extractor.getText();
                         extractor.close();
-                        return text != null ? text : "";
+                        return text;
                     }
                 case "xls":
-                    // 处理旧版Excel文档(.xls)
                     try (HSSFWorkbook workbook = new HSSFWorkbook(inputStream)) {
-                        StringBuilder text = new StringBuilder();
+                        StringBuilder sb = new StringBuilder();
                         for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
                             org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(i);
                             for (org.apache.poi.ss.usermodel.Row row : sheet) {
                                 for (org.apache.poi.ss.usermodel.Cell cell : row) {
                                     if (cell.getCellType() == org.apache.poi.ss.usermodel.CellType.STRING) {
-                                        text.append(cell.getStringCellValue()).append(" ");
+                                        sb.append(cell.getStringCellValue()).append(" ");
                                     } else if (cell.getCellType() == org.apache.poi.ss.usermodel.CellType.NUMERIC) {
-                                        text.append(cell.getNumericCellValue()).append(" ");
+                                        sb.append(cell.getNumericCellValue()).append(" ");
                                     }
                                 }
-                                text.append("\n");
+                                sb.append("\n");
                             }
                         }
-                        return text.toString();
+                        return sb.toString();
                     }
                 case "xlsx":
-                    // 处理新版Excel文档(.xlsx)
                     try (XSSFWorkbook workbook = new XSSFWorkbook(inputStream)) {
-                        StringBuilder text = new StringBuilder();
+                        StringBuilder sb = new StringBuilder();
                         for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
                             org.apache.poi.ss.usermodel.Sheet sheet = workbook.getSheetAt(i);
                             for (org.apache.poi.ss.usermodel.Row row : sheet) {
                                 for (org.apache.poi.ss.usermodel.Cell cell : row) {
                                     switch (cell.getCellType()) {
                                         case STRING:
-                                            text.append(cell.getStringCellValue()).append(" ");
+                                            sb.append(cell.getStringCellValue()).append(" ");
                                             break;
                                         case NUMERIC:
-                                            text.append(cell.getNumericCellValue()).append(" ");
+                                            sb.append(cell.getNumericCellValue()).append(" ");
                                             break;
                                         case BOOLEAN:
-                                            text.append(cell.getBooleanCellValue()).append(" ");
+                                            sb.append(cell.getBooleanCellValue()).append(" ");
                                             break;
                                         default:
                                             break;
                                     }
                                 }
-                                text.append("\n");
+                                sb.append("\n");
                             }
                         }
-                        return text.toString();
+                        return sb.toString();
                     }
                 case "ppt":
                 case "pptx":
-                    // 对于PowerPoint，我们可以提取文本但忽略格式
                     try (POITextExtractor extractor = ExtractorFactory.createExtractor(inputStream)) {
-                        String text = extractor.getText();
+                        text = extractor.getText();
                         return text != null ? text : "";
                     }
                 default:
-                    return "不支持的Office文档格式";
+                    throw new RuntimeException("不支持的Office文档格式: " + extension);
             }
         } catch (Exception e) {
             log.warn("Office文档处理失败: {}", e.getMessage());
-            return "文档处理失败: " + e.getMessage();
+            throw new RuntimeException("Office文档处理失败: " + e.getMessage());
         }
     }
 
@@ -370,7 +386,7 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
      */
     private String extractPreviewText(List<TextSegment> segments) {
         if (segments == null || segments.isEmpty()) {
-            return "";
+            return null;
         }
 
         // 取前3个片段作为预览
@@ -397,8 +413,8 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
         return switch (fileType) {
             case "PDF" -> "application/pdf";
             case "TEXT" -> "text/plain";
-            case "IMAGE" -> "image/*";
-            case "DOCUMENT" -> "application/vnd.openxmlformats-officedocument.*";
+            case "DOCUMENT" -> "application/msword";
+            case "FILE" -> "application/octet-stream";
             default -> "application/octet-stream";
         };
     }
@@ -425,10 +441,49 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
     /**
      * 生成唯一文件名
      */
-    private String generateUniqueFilename(FileTypeDTO fileType, String originalFilename) {
+    private String generateUniqueFilename(String fileType, String extension) {
         String timestamp = String.valueOf(System.currentTimeMillis());
         String random = UUID.randomUUID().toString().substring(0, 8);
-        String extension = getFileExtension(originalFilename);
-        return fileType.getType().toLowerCase() + "_" + timestamp + "_" + random + "." + extension;
+        return fileType.toLowerCase() + "_" + timestamp + "_" + random + "." + extension;
+    }
+
+    /**
+     * 检测文本是否仅为空白或垃圾内容
+     */
+    private boolean isOnlyWhitespaceOrGarbage(String text) {
+        if (text == null) {
+            return true;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return true;
+        }
+        String lower = trimmed.toLowerCase();
+        if (lower.contains("处理失败") || lower.contains("error") || lower.contains("exception") ||
+            lower.contains("未提取") || lower.contains("失败") || lower.contains("错误")) {
+            return true;
+        }
+        long letterCount = text.chars().filter(Character::isLetter).count();
+        if (letterCount > 0 && (double) letterCount / text.length() < 0.2) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 向量化前清理文本，防止失败信息被当正文处理
+     */
+    private String sanitizeTextBeforeEmbedding(String text) {
+        if (text == null) {
+            return null;
+        }
+        String lower = text.toLowerCase();
+        if (lower.contains("处理失败") || lower.contains("error") || lower.contains("exception") ||
+            lower.contains("未提取") || lower.contains("失败") || lower.contains("错误") ||
+            lower.contains("ocr") || lower.contains("extract")) {
+            log.warn("检测到错误信息混入正文，拒绝向量化");
+            return null;
+        }
+        return text;
     }
 }

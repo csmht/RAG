@@ -32,7 +32,8 @@
 
 ### 核心功能
 
-- 📄 **文档上传** - 支持 PDF/TXT，智能分块
+- 📄 **文档上传** - 支持 PDF/TXT/MD/DOC/DOCX，智能分块
+- 📊 **批量上传** - 最多 50 个文件，需 ADMIN 权限
 - 🧠 **智能问答** - RAG检索增强，流式响应
 - 🤖 **智能体对话** - LangChain4j Agentic架构，工具自主调用
 - 📚 **领域文档管理** - 10+领域，异步处理
@@ -133,20 +134,28 @@ open http://localhost:8080
 
 ### 文档管理
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `POST` | `/api/documents/upload` | 上传并处理 PDF/TXT 文档 |
-| `GET` | `/api/documents` | 查询已上传文档列表 |
-| `DELETE` | `/api/documents/{documentId}` | 删除指定文档 |
-| `GET` | `/api/documents/health` | 文档服务健康检查 |
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| `POST` | `/api/documents/upload` | 上传并处理 PDF/TXT/MD/DOC/DOCX 文档 | ADMIN |
+| `POST` | `/api/documents/batch-upload` | 批量上传（最多50个文件） | ADMIN |
+| `GET` | `/api/documents/batch-upload/{taskId}` | 查询批量任务状态 | 创建者/ADMIN |
+| `DELETE` | `/api/documents/{documentId}` | 删除指定文档 | ADMIN |
+| `GET` | `/api/documents/health` | 文档服务健康检查 | 公开 |
 
 ```bash
+# 单文件上传
 curl -X POST http://localhost:8080/api/documents/upload \
-  -F "file=@document.txt"
+  -F "file=@document.pdf" \
+  -H "Authorization: Bearer <admin-token>"
 
-curl http://localhost:8080/api/documents
+# 批量上传
+curl -X POST http://localhost:8080/api/documents/batch-upload \
+  -F "files=@file1.pdf" -F "files=@file2.docx" \
+  -H "Authorization: Bearer <admin-token>"
 
-curl -X DELETE http://localhost:8080/api/documents/{documentId}
+# 查询任务状态
+curl http://localhost:8080/api/documents/batch-upload/<taskId> \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### RAG 问答

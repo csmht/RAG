@@ -1,26 +1,32 @@
 package com.mark.knowledge.rag.service.Impl;
 
-import com.mark.knowledge.rag.common.FileProcessResult;
-import com.mark.knowledge.rag.common.MultiFormatProcessResult;
+import com.mark.knowledge.auth.common.Result;
 import com.mark.knowledge.rag.common.ValidationResult;
 import com.mark.knowledge.rag.dto.BatchUploadDTO;
 import com.mark.knowledge.rag.dto.BatchUploadTaskStatusDTO;
+import com.mark.knowledge.rag.dto.ProcessedFileDTO;
 import com.mark.knowledge.rag.entity.BatchTaskEntity;
+import com.mark.knowledge.rag.entity.BatchFileResultEntity;
 import com.mark.knowledge.rag.repository.BatchTaskRepository;
+import com.mark.knowledge.rag.repository.BatchFileResultRepository;
 import com.mark.knowledge.rag.repository.UploadedFileRepository;
 import com.mark.knowledge.rag.service.BatchUploadService;
 import com.mark.knowledge.rag.service.MultiFormatDocumentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.time.LocalDateTime;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 @Service
 public class BatchUploadServiceImpl implements BatchUploadService {
@@ -34,27 +40,30 @@ public class BatchUploadServiceImpl implements BatchUploadService {
     private static final int MAX_BATCH_SIZE = 50;
     private static final long MAX_FILE_SIZE = 50 * 1024 * 1024;
 
-    // 最多3个并发数据库写入
     private static final Semaphore DB_WRITE_SEMAPHORE = new Semaphore(3);
 
     private final MultiFormatDocumentService multiFormatService;
     private final BatchTaskRepository batchTaskRepository;
     private final UploadedFileRepository uploadedFileRepository;
-
-    // 用于临时存储任务处理结果的内存缓存
-    private final Map<String, List<FileProcessResult>> taskResultsCache = new ConcurrentHashMap<>();
+    private final BatchFileResultRepository batchFileResultRepository;
 
     public BatchUploadServiceImpl(MultiFormatDocumentService multiFormatService,
-                              BatchTaskRepository batchTaskRepository,
-                                  UploadedFileRepository uploadedFileRepository) {
+                                  BatchTaskRepository batchTaskRepository,
+                                  UploadedFileRepository uploadedFileRepository,
+                                  BatchFileResultRepository batchFileResultRepository) {
         this.multiFormatService = multiFormatService;
         this.batchTaskRepository = batchTaskRepository;
         this.uploadedFileRepository = uploadedFileRepository;
+        this.batchFileResultRepository = batchFileResultRepository;
     }
 
     @Transactional
     @Override
     public String create(BatchUploadDTO request) {
+        if (request.getFiles() == null || request.getFiles().isEmpty()) {
+            throw new IllegalArgumentException("文件列表不能为空");
+        }
+
         String taskId = UUID.randomUUID().toString();
 
         if (request.getFiles().size() > MAX_BATCH_SIZE) {
@@ -94,16 +103,11 @@ public class BatchUploadServiceImpl implements BatchUploadService {
         return taskId;
     }
 
-    /**
-     * 顺序处理单个文件（不使用异步）
-     */
-    private FileProcessResult processFileSequential(MultipartFile file, BatchUploadDTO request) {
-        String filename = file.getOriginalFilename();
-        FileProcessResult result = new FileProcessResult();
-        result.setFilename(filename);
+    private ProcessedFileDTO processFileSequential(MultipartFile file, BatchUploadDTO request) {
+        ProcessedFileDTO result = new ProcessedFileDTO();
+        result.setOriginalFilename(file.getOriginalFilename());
 
         try {
-            // 验证文件
             ValidationResult validation = validateFile(file);
             if (!validation.isValid()) {
                 result.setSuccess(false);
@@ -111,38 +115,40 @@ public class BatchUploadServiceImpl implements BatchUploadService {
                 return result;
             }
 
-            // 检查重复文件
             if (isDuplicateFile(file)) {
                 result.setSuccess(false);
                 result.setErrorMessage("文件已存在");
                 return result;
             }
 
-            // 使用信号量控制数据库访问
             DB_WRITE_SEMAPHORE.acquire();
             try {
-                // 处理文件
-                MultiFormatProcessResult processResult =
-                        multiFormatService.processMultiFormatFile(file, request.getUserId());
+                Result<ProcessedFileDTO> processResult = multiFormatService.processMultiFormatFile(file, request.getUserId());
 
-                if (processResult.isSuccess()) {
-                    result.setSuccess(true);
-                    result.setMessage("文件处理成功");
-                    result.setEmbeddingCount(processResult.getFileInfo().getProcessedContentDTO().getEmbeddingCount());
-                    result.setMetadata(processResult.getFileInfo().getProcessedContentDTO().getMetadata());
+                if (processResult.getCode() == 1 && processResult.getData() != null) {
+                    ProcessedFileDTO data = processResult.getData();
+                    result.setSuccess(data.isSuccess());
+                    result.setMessage(data.getMessage());
+                    result.setFilePath(data.getFilePath());
+                    result.setEmbeddingCount(data.getEmbeddingCount());
+                    result.setMetadata(data.getMetadata());
+                    result.setTextContent(data.getTextContent());
+                    if (!data.isSuccess()) {
+                        result.setErrorMessage(data.getErrorMessage());
+                    }
                 } else {
                     result.setSuccess(false);
-                    result.setErrorMessage(processResult.getMessage());
+                    result.setErrorMessage(processResult.getMsg());
                 }
             } finally {
-                DB_WRITE_SEMAPHORE.release(); // 释放信号量
+                DB_WRITE_SEMAPHORE.release();
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             result.setSuccess(false);
             result.setErrorMessage("处理被中断: " + e.getMessage());
         } catch (Exception e) {
-            log.error("处理文件时发生异常: {}", filename, e);
+            log.error("处理文件时发生异常: {}", file.getOriginalFilename(), e);
             result.setSuccess(false);
             result.setErrorMessage("处理失败: " + e.getMessage());
         }
@@ -166,10 +172,9 @@ public class BatchUploadServiceImpl implements BatchUploadService {
 
             List<MultipartFile> files = request.getFiles();
 
-            // 顺序处理文件以完全避免数据库锁竞争
-            List<FileProcessResult> results = new ArrayList<>();
+            List<ProcessedFileDTO> results = new ArrayList<>();
             for (MultipartFile file : files) {
-                FileProcessResult result = processFileSequential(file, request);
+                ProcessedFileDTO result = processFileSequential(file, request);
                 results.add(result);
 
                 if (result.isSuccess()) {
@@ -187,8 +192,8 @@ public class BatchUploadServiceImpl implements BatchUploadService {
                 }
             }
 
-            // 存储结果到缓存
-            taskResultsCache.put(task.getTaskId(), results);
+            // 存储结果到数据库
+            saveBatchFileResults(task.getTaskId(), results);
 
             task.setSuccessCount(successCount.get());
             task.setFailureCount(failureCount.get());
@@ -207,6 +212,23 @@ public class BatchUploadServiceImpl implements BatchUploadService {
             task.setErrorMessage("批量处理失败: " + e.getMessage());
             task.setProgressPercentage(0);
             batchTaskRepository.save(task);
+        }
+    }
+
+    /**
+     * 保存批量文件处理结果到数据库
+     */
+    private void saveBatchFileResults(String taskId, List<ProcessedFileDTO> results) {
+        for (ProcessedFileDTO result : results) {
+            BatchFileResultEntity entity = new BatchFileResultEntity();
+            entity.setTaskId(taskId);
+            entity.setFileName(result.getOriginalFilename());
+            entity.setSuccess(result.isSuccess());
+            entity.setErrorMessage(result.getErrorMessage());
+            entity.setEmbeddingCount(result.getEmbeddingCount() != null ? result.getEmbeddingCount() : 0);
+            entity.setFilePath(result.getFilePath());
+            entity.setProcessedTime(LocalDateTime.now());
+            batchFileResultRepository.save(entity);
         }
     }
 
@@ -366,14 +388,25 @@ public class BatchUploadServiceImpl implements BatchUploadService {
         BatchTaskEntity task = batchTaskRepository.findByTaskId(taskId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在: " + taskId));
 
+        // 获取当前登录用户
+        String currentUserId = getCurrentUsername();
+
+        // 权限校验：只有任务创建者或管理员可以查看任务状态
+        if (!task.getUserId().equals(currentUserId) && !hasAdminRole(currentUserId)) {
+            throw new IllegalArgumentException("无权限查看此任务状态");
+        }
+
         BatchUploadTaskStatusDTO dto = new BatchUploadTaskStatusDTO();
         dto.setTaskId(task.getTaskId());
         dto.setStatus(task.getStatus().name());
         dto.setTotalFiles(task.getTotalFiles());
         dto.setSuccessCount(task.getSuccessCount());
         dto.setFailureCount(task.getFailureCount());
-        // 从缓存获取结果
-        List<FileProcessResult> results = taskResultsCache.getOrDefault(taskId, new ArrayList<>());
+        // 从数据库获取结果
+        List<BatchFileResultEntity> resultEntities = batchFileResultRepository.findByTaskId(taskId);
+        List<ProcessedFileDTO> results = resultEntities.stream()
+                .map(this::convertToProcessedFileDTO)
+                .collect(Collectors.toList());
         dto.setResults(results);
         dto.setErrorMessage(task.getErrorMessage());
         dto.setCreatedTime(task.getCreatedTime());
@@ -390,6 +423,39 @@ public class BatchUploadServiceImpl implements BatchUploadService {
             return filename.substring(lastDotIndex + 1);
         }
         return "";
+    }
+
+    private ProcessedFileDTO convertToProcessedFileDTO(BatchFileResultEntity entity) {
+        ProcessedFileDTO result = new ProcessedFileDTO();
+        result.setOriginalFilename(entity.getFileName());
+        result.setSuccess(entity.isSuccess());
+        result.setErrorMessage(entity.getErrorMessage());
+        result.setEmbeddingCount(entity.getEmbeddingCount());
+        result.setMessage(entity.isSuccess() && entity.getEmbeddingCount() == 0 ? "文件已保存，不进行内容处理" : null);
+        result.setFilePath(entity.getFilePath());
+        return result;
+    }
+
+    private String getCurrentUsername() {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication != null && authentication.isAuthenticated() &&
+            !"anonymousUser".equals(authentication.getName())) {
+            return authentication.getName();
+        }
+        return "unknown";
+    }
+
+    private boolean hasAdminRole(String username) {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        if (authentication == null) {
+            return false;
+        }
+        for (GrantedAuthority authority : authentication.getAuthorities()) {
+            if ("ROLE_ADMIN".equals(authority.getAuthority())) {
+                return true;
+            }
+        }
+        return false;
     }
 
 }

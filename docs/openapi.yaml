@@ -24,8 +24,11 @@ paths:
         - Documents
       summary: 上传并处理文档
       description: |
-        上传 `PDF` 或 `TXT` 文件，服务端会解析文本、切块、生成向量并写入知识库。
+        上传 PDF/TXT/MD/DOC/DOCX 文件，服务端会解析文本、切块、生成向量并写入知识库。
+        图片(xjpg/png/bmp)和Office表格(ppt/xls/xlsx)仅保存文件，不进行内容处理。
       operationId: uploadDocument
+      security:
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -38,40 +41,155 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: 仅支持 `.pdf` 和 `.txt`
+                  description: 支持 pdf/txt/md/doc/docx（内容处理）+ jpg/jpeg/png/bmp/xls/xlsx/ppt/pptx（仅存储）
       responses:
         '200':
           description: 文档处理成功
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DocumentResponse'
+                $ref: '#/components/schemas/MultiFormatDocumentResponse'
               example:
-                documentId: 6f8b83e5-ec3d-4d50-92b1-740d441e31e8
                 filename: company-policy.pdf
-                message: 文档处理成功
-                segmentCount: 18
+                fileType: PDF
+                message: 文件处理成功
+                embeddingCount: 18
+                textContent: "..."
         '400':
           description: 文件为空、文件名缺失或文件格式不支持
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-              examples:
-                emptyFile:
-                  summary: 空文件
-                  value:
-                    error: 无效文件
-                    message: 文件为空
-                    timestamp: '2026-03-28T18:00:00'
-                invalidType:
-                  summary: 不支持的类型
-                  value:
-                    error: 不支持的文件类型
-                    message: 仅支持 PDF 和 TXT 文件
-                    timestamp: '2026-03-28T18:00:00'
+        '403':
+          description: 需要 ADMIN 角色
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: 文档解析、切块或向量入库失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/documents/batch-upload:
+    post:
+      tags:
+        - Documents
+      summary: 批量上传文档
+      description: |
+        最多支持 50 个文件。
+        PDF/TXT/MD/DOC/DOCX 进行内容提取和向量化；
+        其他格式仅保存到本地，不进行内容处理。
+        需要 ADMIN 角色。
+      operationId: batchUploadDocuments
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - files
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: 文件列表，最多50个
+                  maxItems: 50
+                knowledgeBase:
+                  type: string
+                  nullable: true
+                  description: 知识库标识，默认 "default"
+                category:
+                  type: string
+                  nullable: true
+                  description: 文档分类
+                tags:
+                  type: string
+                  nullable: true
+                  description: 标签列表，逗号分隔
+      responses:
+        '200':
+          description: 任务创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadResponse'
+              example:
+                code: 200
+                data: "550e8400-e29b-41d4-a716-446655440000"
+                message: success
+        '400':
+          description: 文件列表为空或数量超限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: 需要 ADMIN 角色
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 任务创建失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/documents/batch-upload/{taskId}:
+    get:
+      tags:
+        - Documents
+      summary: 查询批量任务状态
+      description: |
+        查询指定任务的处理进度和结果。
+        仅任务创建者或 ADMIN 可查询。
+      operationId: getBatchUploadStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          description: 任务ID（UUID）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadTaskStatus'
+              example:
+                taskId: "550e8400-e29b-41d4-a716-446655440000"
+                status: "COMPLETED"
+                totalFiles: 10
+                successCount: 8
+                failureCount: 2
+                progressPercentage: 100
+                results:
+                  - filename: file1.pdf
+                    success: true
+                    embeddingCount: 15
+                  - filename: file2.docx
+                    success: false
+                    errorMessage: "Office文档处理失败"
+        '403':
+          description: 无权限查看此任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 任务不存在
           content:
             application/json:
               schema:
@@ -82,6 +200,8 @@ paths:
         - Documents
       summary: 获取已上传文档列表
       operationId: listDocuments
+      security:
+        - bearerAuth: []
       responses:
         '200':
           description: 文档列表
@@ -328,6 +448,11 @@ paths:
                 type: string
               example: RAG 服务运行正常
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
   parameters:
     DocumentId:
       name: documentId
@@ -479,8 +604,134 @@ components:
           description: 错误标题
         message:
           type: string
-          description: 详细错误信息
+          description: 删除结果消息
         timestamp:
           type: string
           format: date-time
           description: 错误发生时间
+    MultiFormatDocumentResponse:
+      type: object
+      required:
+        - filename
+        - fileType
+        - message
+      properties:
+        filename:
+          type: string
+          description: 原始文件名
+        fileType:
+          type: string
+          description: 文件类型（PDF/TEXT/DOCUMENT/FILE）
+        message:
+          type: string
+          description: 处理结果消息
+        embeddingCount:
+          type: integer
+          format: int32
+          nullable: true
+          description: 向量片段数量
+        textContent:
+          type: string
+          nullable: true
+          description: 提取的文本内容（预览）
+        metadata:
+          type: object
+          nullable: true
+          description: 处理元数据
+    BatchUploadResponse:
+      type: object
+      required:
+        - code
+        - data
+        - message
+      properties:
+        code:
+          type: integer
+          format: int32
+        data:
+          type: string
+          description: 任务ID（UUID）
+        message:
+          type: string
+    BatchUploadTaskStatus:
+      type: object
+      required:
+        - taskId
+        - status
+        - totalFiles
+      properties:
+        taskId:
+          type: string
+          description: 任务ID
+        status:
+          type: string
+          enum: [CREATED, PROCESSING, COMPLETED, FAILED]
+          description: 任务状态
+        totalFiles:
+          type: integer
+          format: int32
+        successCount:
+          type: integer
+          format: int32
+          nullable: true
+        failureCount:
+          type: integer
+          format: int32
+          nullable: true
+        progressPercentage:
+          type: integer
+          format: int32
+        results:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/FileProcessResult'
+        errorMessage:
+          type: string
+          nullable: true
+          description: 整体错误信息
+        createdTime:
+          type: string
+          format: date-time
+          nullable: true
+        completedTime:
+          type: string
+          format: date-time
+          nullable: true
+    FileProcessResult:
+      type: object
+      required:
+        - originalFilename
+        - success
+      properties:
+        originalFilename:
+          type: string
+          description: 原始文件名
+        success:
+          type: boolean
+          description: 是否成功
+        message:
+          type: string
+          nullable: true
+          description: 处理结果消息
+        filePath:
+          type: string
+          nullable: true
+          description: 文件存储路径
+        embeddingCount:
+          type: integer
+          format: int32
+          nullable: true
+          description: 向量片段数量
+        errorMessage:
+          type: string
+          nullable: true
+          description: 错误信息
+        textContent:
+          type: string
+          nullable: true
+          description: 提取的文本内容
+        metadata:
+          type: object
+          nullable: true
+          description: 处理元数据

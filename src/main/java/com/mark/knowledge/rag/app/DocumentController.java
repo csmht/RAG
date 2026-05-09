@@ -1,13 +1,17 @@
 package com.mark.knowledge.rag.app;
 
 import com.mark.knowledge.auth.common.Result;
-import com.mark.knowledge.rag.common.MultiFormatProcessResult;
-import com.mark.knowledge.rag.dto.*;
+import com.mark.knowledge.rag.dto.BatchUploadDTO;
+import com.mark.knowledge.rag.dto.BatchUploadTaskStatusDTO;
+import com.mark.knowledge.rag.dto.DocumentDeleteResponse;
+import com.mark.knowledge.rag.dto.ErrorResponse;
+import com.mark.knowledge.rag.dto.ProcessedFileDTO;
 import com.mark.knowledge.rag.service.BatchUploadService;
 import com.mark.knowledge.rag.service.DocumentAdminService;
 import com.mark.knowledge.rag.service.MultiFormatDocumentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -16,19 +20,9 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 
-/**
- * 文档上传和管理控制器
- *
- * @author mark
- */
 @RestController
 @RequestMapping("/api/documents")
 public class DocumentController {
@@ -50,32 +44,28 @@ public class DocumentController {
      */
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<?> uploadDocument(
-            @RequestParam("file") MultipartFile file) {
+    public ResponseEntity<?> uploadDocument(@RequestParam("file") MultipartFile file) {
         String userName = getCurrentUsername();
-        log.info("收到多格式文件上传请求: 用户={}, 文件名={}", userName, file.getOriginalFilename());
+        log.info("收到文件上传请求: 用户={}, 文件名={}", userName, file.getOriginalFilename());
+
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest().body(new ErrorResponse("无效文件", "文件为空"));
+        }
 
         try {
-            if (file.isEmpty()) {
-                return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("无效文件", "文件为空"));
-            }
+            Result<ProcessedFileDTO> result = multiFormatDocumentService.processMultiFormatFile(file, userName);
 
-            MultiFormatProcessResult result =
-                    multiFormatDocumentService.processMultiFormatFile(file, userName);
-
-            if (result.isSuccess()) {
-                return ResponseEntity.ok(new MultiFormatDocumentDTO(
-                        result.getFileInfo().getOriginalFilename(),
-                        result.getFileInfo().getFileType().getType(),
-                        result.getMessage(),
-                        result.getFileInfo().getProcessedContentDTO().getEmbeddingCount(),
-                        result.getFileInfo().getProcessedContentDTO().getTextContent(),
-                        result.getFileInfo().getProcessedContentDTO().getMetadata()
-                ));
+            if (result.getCode() == 1 && result.getData() != null && result.getData().isSuccess()) {
+                ProcessedFileDTO dto = result.getData();
+                Map<String, Object> response = new HashMap<>();
+                response.put("filename", dto.getOriginalFilename());
+                response.put("message", dto.getMessage());
+                response.put("embeddingCount", dto.getEmbeddingCount());
+                response.put("textContent", dto.getTextContent());
+                return ResponseEntity.ok(response);
             } else {
-                return ResponseEntity.badRequest()
-                        .body(new ErrorResponse("文件处理失败", result.getMessage()));
+                String errorMsg = result.getData() != null ? result.getData().getErrorMessage() : result.getMsg();
+                return ResponseEntity.badRequest().body(new ErrorResponse("文件处理失败", errorMsg));
             }
 
         } catch (Exception e) {
@@ -107,6 +97,7 @@ public class DocumentController {
      * @return 批量上传任务信息
      */
     @PostMapping(value = "/batch-upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PreAuthorize("hasRole('ADMIN')")
     public Result<String> batchUploadDocuments(
             @RequestParam("files") List<MultipartFile> files,
             @RequestParam(value = "knowledgeBase", required = false) String knowledgeBase,
