@@ -88,6 +88,10 @@ public class DocumentService {
     @Value("${rag.keyword-count:6}")
     private int keywordCount;
 
+    @Value("${rag.chunk-title-max-length:24}")
+    private int chunkTitleMaxLength;
+
+
     /**
      * 处理输入流中的文档
      *
@@ -212,7 +216,9 @@ public class DocumentService {
             }
 
             List<String> chunkKeywords = resolveChunkKeywords(profile, chunk);
-            String enhancedText = buildEnhancedText(profile.title(), chunk, chunkKeywords);
+            String chunkTitle = resolveChunkTitle(profile, chunk, chunkKeywords);
+            String enhancedText = buildEnhancedText(chunkTitle, chunk, chunkKeywords);
+
             segments.add(createSegment(
                 enhancedText,
                 chunk,
@@ -221,7 +227,8 @@ public class DocumentService {
                 chunkIndex++,
                 normalizedChunk,
                 profile,
-                chunkKeywords
+                chunkKeywords,
+                chunkTitle
             ));
         }
 
@@ -429,7 +436,8 @@ public class DocumentService {
             int index,
             String normalizedChunk,
             DocumentProfile profile,
-            List<String> chunkKeywords) {
+            List<String> chunkKeywords,
+            String chunkTitle) {
         Metadata metadata = new Metadata();
         metadata.put("filename", sanitizeUtf16(filename));
         metadata.put("documentId", sanitizeUtf16(documentId));
@@ -438,6 +446,7 @@ public class DocumentService {
         metadata.put("rawChunkSize", String.valueOf(sanitizeUtf16(rawText).length()));
         metadata.put("chunkHash", Integer.toHexString(normalizedChunk.hashCode()));
         metadata.put("title", sanitizeUtf16(profile.title()));
+        metadata.put("chunkTitle", sanitizeUtf16(chunkTitle));
         metadata.put("category", sanitizeUtf16(profile.category()));
         metadata.put("documentTime", sanitizeUtf16(profile.documentTime()));
         metadata.put("ingestedAt", sanitizeUtf16(profile.ingestedAt()));
@@ -480,6 +489,92 @@ public class DocumentService {
         }
 
         return new ArrayList<>(resolved);
+    }
+
+    private String resolveChunkTitle(DocumentProfile profile, String chunk, List<String> chunkKeywords) {
+        String chunkSummary = extractChunkSummary(chunk);
+        if (chunkSummary.isBlank()) {
+            return sanitizeUtf16(profile.title());
+        }
+
+        if (chunkSummary.equals(profile.title())) {
+            return sanitizeUtf16(profile.title());
+        }
+
+        if (chunkKeywords.isEmpty()) {
+            return sanitizeUtf16(profile.title() + " / " + chunkSummary);
+        }
+
+        for (String keyword : chunkKeywords) {
+            if (chunkSummary.contains(keyword)) {
+                return sanitizeUtf16(profile.title() + " / " + chunkSummary);
+            }
+        }
+
+        return sanitizeUtf16(profile.title() + " / " + chunkSummary + "（" + chunkKeywords.getFirst() + "）");
+    }
+
+    private String extractChunkSummary(String chunk) {
+        List<String> paragraphs = Arrays.stream(sanitizeUtf16(chunk).split("\\n\\n+"))
+            .map(String::trim)
+            .filter(paragraph -> !paragraph.isBlank())
+            .collect(Collectors.toList());
+        if (paragraphs.isEmpty()) {
+            return "";
+        }
+
+        int maxTitleLength = Math.max(8, chunkTitleMaxLength);
+        int preferredBoundaryStart = Math.max(6, maxTitleLength - 6);
+        int sentenceScanLimit = Math.max(maxTitleLength, maxTitleLength + 6);
+
+        String firstParagraph = paragraphs.getFirst();
+        if (isLikelyTitle(firstParagraph)) {
+            return normalizeTitle(firstParagraph);
+        }
+
+        String firstSentence = extractLeadingSentence(firstParagraph, sentenceScanLimit);
+        if (firstSentence.isBlank()) {
+            return "";
+        }
+
+        if (firstSentence.length() <= maxTitleLength) {
+            return sanitizeUtf16(firstSentence);
+        }
+
+        int boundary = firstSentence.length();
+        for (int i = preferredBoundaryStart; i < Math.min(firstSentence.length(), sentenceScanLimit); i++) {
+            char current = firstSentence.charAt(i);
+            if (Character.isWhitespace(current) || current == '，' || current == '、' || current == '：' || current == ':') {
+                boundary = i;
+                break;
+            }
+        }
+
+        String summary = firstSentence.substring(0, Math.min(boundary, maxTitleLength)).trim();
+        if (summary.length() < 8) {
+            summary = firstSentence.substring(0, Math.min(firstSentence.length(), maxTitleLength)).trim();
+        }
+        return sanitizeUtf16(summary);
+    }
+
+    private String extractLeadingSentence(String paragraph, int maxLength) {
+        String normalized = sanitizeUtf16(paragraph).replace('\n', ' ').trim();
+        if (normalized.isBlank()) {
+            return "";
+        }
+
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < normalized.length(); i++) {
+            char current = normalized.charAt(i);
+            if (isSentenceBoundary(current)) {
+                break;
+            }
+            builder.append(current);
+            if (builder.length() >= maxLength) {
+                break;
+            }
+        }
+        return builder.toString().trim();
     }
 
     private DocumentProfile buildDocumentProfile(String filename, String cleanedText) {
