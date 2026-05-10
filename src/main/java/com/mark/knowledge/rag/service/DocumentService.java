@@ -419,7 +419,6 @@ public class DocumentService {
         if (!current.isEmpty()) {
             units.add(createUnit(current.toString().trim(), unitType, sectionTitle, headingLevel, false));
         }
-
         return units;
     }
 
