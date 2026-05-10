@@ -30,6 +30,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -57,6 +58,11 @@ public class DocumentService {
     );
     private static final Pattern LATIN_TOKEN_PATTERN = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{2,30}");
     private static final Pattern HAN_SEQUENCE_PATTERN = Pattern.compile("[\\p{IsHan}]{2,24}");
+    private static final Pattern MARKDOWN_HEADING_PATTERN = Pattern.compile("^(#{1,6})\\s+(.+)$");
+    private static final Pattern CHINESE_SECTION_HEADING_PATTERN = Pattern.compile("^([一二三四五六七八九十]+、|（[一二三四五六七八九十]+）)\\s*(.+)$");
+    private static final Pattern NUMERIC_SECTION_HEADING_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+){0,2}[、.])\\s*(.+)$");
+    private static final Pattern NUMERIC_SECTION_HEADING_PAREN_PATTERN = Pattern.compile("^（?\\d+）\\s*(.+)$");
+    private static final Pattern LIST_ITEM_PATTERN = Pattern.compile("^(?:[-*•]|\\d+[.)]|[一二三四五六七八九十]+、|（\\d+）)\\s+.+$");
 
     private static final Set<String> KEYWORD_STOP_WORDS = Set.of(
         "我们", "你们", "他们", "她们", "是否", "已经", "进行", "可以", "需要", "因为", "所以",
@@ -230,7 +236,7 @@ public class DocumentService {
         log.debug("  文本总长度: {} 字符", profile.bodyText().length());
 
         DeduplicationResult unitDeduplication = deduplicateUnits(splitIntoUnits(profile.bodyText(), chunkSettings));
-        List<String> chunks = mergeShortChunks(assembleChunks(unitDeduplication.units(), chunkSettings), chunkSettings);
+        List<ChunkCandidate> chunks = mergeShortChunks(assembleChunks(unitDeduplication.units(), chunkSettings), chunkSettings);
 
         List<TextSegment> segments = new ArrayList<>();
         Set<String> seenChunks = new HashSet<>();
@@ -238,8 +244,9 @@ public class DocumentService {
         int filteredDuplicateCount = unitDeduplication.filteredDuplicateCount();
         int chunkIndex = 0;
 
-        for (String chunk : chunks) {
-            String normalizedChunk = normalizeForDedup(chunk);
+        for (ChunkCandidate chunk : chunks) {
+            String rawChunk = chunk.text();
+            String normalizedChunk = normalizeForDedup(rawChunk);
             if (normalizedChunk.length() < minTextLength) {
                 filteredShortCount++;
                 continue;
@@ -250,13 +257,13 @@ public class DocumentService {
                 continue;
             }
 
-            List<String> chunkKeywords = resolveChunkKeywords(profile, chunk);
+            List<String> chunkKeywords = resolveChunkKeywords(profile, rawChunk);
             String chunkTitle = resolveChunkTitle(profile, chunk, chunkKeywords);
-            String enhancedText = buildEnhancedText(chunkTitle, chunk, chunkKeywords);
+            String enhancedText = buildEnhancedText(chunkTitle, rawChunk, chunkKeywords);
 
             segments.add(createSegment(
                 enhancedText,
-                chunk,
+                rawChunk,
                 filename,
                 documentId,
                 chunkIndex++,
@@ -275,17 +282,20 @@ public class DocumentService {
         return new ChunkBuildResult(segments, filteredShortCount, filteredDuplicateCount);
     }
 
-    private DeduplicationResult deduplicateUnits(List<String> units) {
-        List<String> uniqueUnits = new ArrayList<>();
+    /**
+     * 对结构化单元做去重，保留标题单元，避免章节上下文丢失。
+     */
+    private DeduplicationResult deduplicateUnits(List<StructuredUnit> units) {
+        List<StructuredUnit> uniqueUnits = new ArrayList<>();
         Set<String> seenUnits = new HashSet<>();
         int filteredDuplicateCount = 0;
 
-        for (String unit : units) {
-            String normalizedUnit = normalizeForDedup(unit);
+        for (StructuredUnit unit : units) {
+            String normalizedUnit = unit.normalizedText();
             if (normalizedUnit.isBlank()) {
                 continue;
             }
-            if (!seenUnits.add(normalizedUnit)) {
+            if (unit.unitType() != UnitType.HEADING && !seenUnits.add(normalizedUnit)) {
                 filteredDuplicateCount++;
                 continue;
             }
@@ -295,26 +305,54 @@ public class DocumentService {
         return new DeduplicationResult(uniqueUnits, filteredDuplicateCount);
     }
 
-    private List<String> splitIntoUnits(String text, ChunkSettings chunkSettings) {
+    /**
+     * 将正文拆为结构化单元，并在拆分阶段识别标题、列表与章节归属。
+     */
+    private List<StructuredUnit> splitIntoUnits(String text, ChunkSettings chunkSettings) {
         List<String> paragraphs = Arrays.stream(text.split("\\n\\n+"))
             .map(String::trim)
             .filter(paragraph -> !paragraph.isBlank())
             .collect(Collectors.toList());
         log.debug("  发现 {} 个段落", paragraphs.size());
 
-        List<String> units = new ArrayList<>();
+        List<StructuredUnit> units = new ArrayList<>();
+        String currentSectionTitle = "";
+        int currentHeadingLevel = 0;
+
         for (String paragraph : paragraphs) {
-            if (paragraph.length() <= chunkSettings.maxSize()) {
-                units.add(paragraph);
+            HeadingMatch headingMatch = matchHeading(paragraph);
+            if (headingMatch.matched()) {
+                currentSectionTitle = headingMatch.title();
+                currentHeadingLevel = headingMatch.level();
+                units.add(createUnit(paragraph, UnitType.HEADING, currentSectionTitle, currentHeadingLevel, false));
                 continue;
             }
-            units.addAll(splitLongParagraph(paragraph, chunkSettings));
+
+            UnitType unitType = isListParagraph(paragraph) ? UnitType.LIST : UnitType.PARAGRAPH;
+            if (paragraph.length() <= chunkSettings.maxSize()) {
+                units.add(createUnit(paragraph, unitType, currentSectionTitle, currentHeadingLevel, false));
+                continue;
+            }
+
+            if (unitType == UnitType.LIST) {
+                units.addAll(splitLongList(paragraph, currentSectionTitle, currentHeadingLevel, chunkSettings));
+            } else {
+                units.addAll(splitLongParagraph(paragraph, currentSectionTitle, currentHeadingLevel, unitType, chunkSettings));
+            }
         }
         return units;
     }
 
-    private List<String> splitLongParagraph(String paragraph, ChunkSettings chunkSettings) {
-        List<String> units = new ArrayList<>();
+    /**
+     * 按句子边界拆分超长正文，并保留所属章节与单元类型。
+     */
+    private List<StructuredUnit> splitLongParagraph(
+            String paragraph,
+            String sectionTitle,
+            int headingLevel,
+            UnitType unitType,
+            ChunkSettings chunkSettings) {
+        List<StructuredUnit> units = new ArrayList<>();
         String[] sentences = paragraph.split("(?<=[。！？!?；;])");
         StringBuilder current = new StringBuilder();
 
@@ -326,10 +364,10 @@ public class DocumentService {
 
             if (trimmedSentence.length() > chunkSettings.maxSize()) {
                 if (!current.isEmpty()) {
-                    units.add(current.toString().trim());
+                    units.add(createUnit(current.toString().trim(), unitType, sectionTitle, headingLevel, false));
                     current.setLength(0);
                 }
-                units.addAll(sliceLongText(trimmedSentence, chunkSettings));
+                units.addAll(sliceLongText(trimmedSentence, sectionTitle, headingLevel, unitType, chunkSettings));
                 continue;
             }
 
@@ -341,21 +379,74 @@ public class DocumentService {
             if (current.length() + 1 + trimmedSentence.length() <= chunkSettings.maxSize()) {
                 current.append(' ').append(trimmedSentence);
             } else {
-                units.add(current.toString().trim());
+                units.add(createUnit(current.toString().trim(), unitType, sectionTitle, headingLevel, false));
                 current.setLength(0);
                 current.append(trimmedSentence);
             }
         }
 
         if (!current.isEmpty()) {
-            units.add(current.toString().trim());
+            units.add(createUnit(current.toString().trim(), unitType, sectionTitle, headingLevel, false));
         }
 
         return units;
     }
 
-    private List<String> sliceLongText(String text, ChunkSettings chunkSettings) {
-        List<String> slices = new ArrayList<>();
+    /**
+     * 优先按列表项拆分超长列表，必要时再回退到通用切片逻辑。
+     */
+    private List<StructuredUnit> splitLongList(
+            String paragraph,
+            String sectionTitle,
+            int headingLevel,
+            ChunkSettings chunkSettings) {
+        List<String> listItems = splitListItems(paragraph);
+        if (listItems.size() <= 1) {
+            return splitLongParagraph(paragraph, sectionTitle, headingLevel, UnitType.LIST, chunkSettings);
+        }
+
+        List<StructuredUnit> units = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (String item : listItems) {
+            if (item.length() > chunkSettings.maxSize()) {
+                if (!current.isEmpty()) {
+                    units.add(createUnit(current.toString().trim(), UnitType.LIST, sectionTitle, headingLevel, false));
+                    current.setLength(0);
+                }
+                units.addAll(sliceLongText(item, sectionTitle, headingLevel, UnitType.LIST, chunkSettings));
+                continue;
+            }
+
+            if (current.isEmpty()) {
+                current.append(item);
+                continue;
+            }
+
+            if (current.length() + 1 + item.length() <= chunkSettings.maxSize()) {
+                current.append('\n').append(item);
+            } else {
+                units.add(createUnit(current.toString().trim(), UnitType.LIST, sectionTitle, headingLevel, false));
+                current.setLength(0);
+                current.append(item);
+            }
+        }
+
+        if (!current.isEmpty()) {
+            units.add(createUnit(current.toString().trim(), UnitType.LIST, sectionTitle, headingLevel, false));
+        }
+        return units;
+    }
+
+    /**
+     * 对超长文本执行带重叠窗口的切片，并尽量在语义边界处截断。
+     */
+    private List<StructuredUnit> sliceLongText(
+            String text,
+            String sectionTitle,
+            int headingLevel,
+            UnitType unitType,
+            ChunkSettings chunkSettings) {
+        List<StructuredUnit> slices = new ArrayList<>();
         int overlap = Math.max(0, Math.min(chunkOverlap, chunkSettings.minSize() / 2));
         int start = 0;
 
@@ -373,7 +464,7 @@ public class DocumentService {
 
             String slice = text.substring(start, end).trim();
             if (!slice.isBlank()) {
-                slices.add(slice);
+                slices.add(createUnit(slice, unitType, sectionTitle, headingLevel, true));
             }
 
             if (end >= text.length()) {
@@ -386,6 +477,9 @@ public class DocumentService {
         return slices;
     }
 
+    /**
+     * 在允许范围内寻找更自然的截断边界，优先命中句末或空白位置。
+     */
     private int findBoundary(String text, int minIndex, int maxIndex) {
         for (int i = maxIndex; i > minIndex; i--) {
             char current = text.charAt(i - 1);
@@ -396,53 +490,56 @@ public class DocumentService {
         return maxIndex;
     }
 
-    private List<String> assembleChunks(List<String> units, ChunkSettings chunkSettings) {
-        List<String> chunks = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
+    /**
+     * 按章节与长度规则将结构化单元组装为候选文本块。
+     */
+    private List<ChunkCandidate> assembleChunks(List<StructuredUnit> units, ChunkSettings chunkSettings) {
+        List<ChunkCandidate> chunks = new ArrayList<>();
+        List<StructuredUnit> currentUnits = new ArrayList<>();
 
-        for (String unit : units) {
-            if (unit.isBlank()) {
+        for (StructuredUnit unit : units) {
+            if (unit.text().isBlank()) {
                 continue;
             }
 
-            if (current.isEmpty()) {
-                current.append(unit);
+            if (currentUnits.isEmpty()) {
+                currentUnits.add(unit);
                 continue;
             }
 
-            if (current.length() + 2 + unit.length() <= chunkSettings.maxSize()) {
-                current.append("\n\n").append(unit);
-            } else {
-                chunks.add(current.toString().trim());
-                current.setLength(0);
-                current.append(unit);
+            if (shouldStartNewChunk(currentUnits, unit, chunkSettings)) {
+                chunks.add(toChunkCandidate(currentUnits));
+                currentUnits = new ArrayList<>();
             }
+            currentUnits.add(unit);
         }
 
-        if (!current.isEmpty()) {
-            chunks.add(current.toString().trim());
+        if (!currentUnits.isEmpty()) {
+            chunks.add(toChunkCandidate(currentUnits));
         }
 
         return chunks;
     }
 
-    private List<String> mergeShortChunks(List<String> chunks, ChunkSettings chunkSettings) {
+    /**
+     * 对过短候选块做二次合并，优先保留同章节的语义连续性。
+     */
+    private List<ChunkCandidate> mergeShortChunks(List<ChunkCandidate> chunks, ChunkSettings chunkSettings) {
         if (chunks.isEmpty()) {
             return List.of();
         }
 
-        List<String> merged = new ArrayList<>();
-        for (String chunk : chunks) {
+        List<ChunkCandidate> merged = new ArrayList<>();
+        for (ChunkCandidate chunk : chunks) {
             if (merged.isEmpty()) {
                 merged.add(chunk);
                 continue;
             }
 
             int lastIndex = merged.size() - 1;
-            String previous = merged.get(lastIndex);
-            if ((previous.length() < chunkSettings.minSize() || chunk.length() < chunkSettings.minSize())
-                    && previous.length() + 2 + chunk.length() <= chunkSettings.maxSize() + chunkSettings.minSize() / 2) {
-                merged.set(lastIndex, previous + "\n\n" + chunk);
+            ChunkCandidate previous = merged.get(lastIndex);
+            if (shouldMergeChunks(previous, chunk, chunkSettings)) {
+                merged.set(lastIndex, mergeChunkCandidates(previous, chunk));
                 continue;
             }
 
@@ -451,11 +548,12 @@ public class DocumentService {
 
         if (merged.size() > 1) {
             int lastIndex = merged.size() - 1;
-            String last = merged.get(lastIndex);
-            String previous = merged.get(lastIndex - 1);
-            if (last.length() < chunkSettings.minSize()
-                    && previous.length() + 2 + last.length() <= chunkSettings.maxSize() + chunkSettings.minSize() / 2) {
-                merged.set(lastIndex - 1, previous + "\n\n" + last);
+            ChunkCandidate last = merged.get(lastIndex);
+            ChunkCandidate previous = merged.get(lastIndex - 1);
+            if (last.text().length() < chunkSettings.minSize()
+                    && canMergeChunkTexts(previous.text(), last.text(), chunkSettings)
+                    && shareSection(previous, last)) {
+                merged.set(lastIndex - 1, mergeChunkCandidates(previous, last));
                 merged.remove(lastIndex);
             }
         }
@@ -463,6 +561,9 @@ public class DocumentService {
         return merged;
     }
 
+    /**
+     * 将增强后的文本块与元数据封装为最终入库片段。
+     */
     private TextSegment createSegment(
             String enhancedText,
             String rawText,
@@ -490,6 +591,9 @@ public class DocumentService {
         return TextSegment.from(sanitizeUtf16(enhancedText), metadata);
     }
 
+    /**
+     * 生成用于嵌入和检索的增强文本，统一拼接标题与关键词上下文。
+     */
     private String buildEnhancedText(String title, String chunk, List<String> chunkKeywords) {
         StringBuilder builder = new StringBuilder();
         builder.append("【标题：").append(title).append("】\n");
@@ -500,6 +604,9 @@ public class DocumentService {
         return sanitizeUtf16(builder.toString());
     }
 
+    /**
+     * 结合文档级画像与块内容提取片段关键词。
+     */
     private List<String> resolveChunkKeywords(DocumentProfile profile, String chunk) {
         LinkedHashSet<String> resolved = new LinkedHashSet<>();
         if (!"未分类".equals(profile.category())) {
@@ -526,8 +633,16 @@ public class DocumentService {
         return new ArrayList<>(resolved);
     }
 
-    private String resolveChunkTitle(DocumentProfile profile, String chunk, List<String> chunkKeywords) {
-        String chunkSummary = extractChunkSummary(chunk);
+    /**
+     * 为候选块生成最终标题，优先使用继承章节标题，再回退摘要标题。
+     */
+    private String resolveChunkTitle(DocumentProfile profile, ChunkCandidate chunk, List<String> chunkKeywords) {
+        String sectionTitle = sanitizeUtf16(chunk.sectionTitle());
+        if (!sectionTitle.isBlank() && !sectionTitle.equals(profile.title())) {
+            return sanitizeUtf16(profile.title() + " / " + sectionTitle);
+        }
+
+        String chunkSummary = extractChunkSummary(chunk.text());
         if (chunkSummary.isBlank()) {
             return sanitizeUtf16(profile.title());
         }
@@ -549,6 +664,9 @@ public class DocumentService {
         return sanitizeUtf16(profile.title() + " / " + chunkSummary + "（" + chunkKeywords.getFirst() + "）");
     }
 
+    /**
+     * 从块内容中提炼简短摘要，作为无章节标题时的备用标题。
+     */
     private String extractChunkSummary(String chunk) {
         List<String> paragraphs = Arrays.stream(sanitizeUtf16(chunk).split("\\n\\n+"))
             .map(String::trim)
@@ -592,6 +710,9 @@ public class DocumentService {
         return sanitizeUtf16(summary);
     }
 
+    /**
+     * 提取段落开头句子，用于生成片段摘要标题。
+     */
     private String extractLeadingSentence(String paragraph, int maxLength) {
         String normalized = sanitizeUtf16(paragraph).replace('\n', ' ').trim();
         if (normalized.isBlank()) {
@@ -612,6 +733,223 @@ public class DocumentService {
         return builder.toString().trim();
     }
 
+    /**
+     * 根据文本内容创建结构化单元，并同步生成规范化判重文本。
+     */
+    private StructuredUnit createUnit(
+            String text,
+            UnitType unitType,
+            String sectionTitle,
+            int headingLevel,
+            boolean sliced) {
+        String safeText = sanitizeUtf16(text).trim();
+        return new StructuredUnit(
+            safeText,
+            normalizeForDedup(safeText),
+            unitType,
+            sanitizeUtf16(sectionTitle),
+            headingLevel,
+            sliced
+        );
+    }
+
+    /**
+     * 识别段落是否为章节标题，并返回标题文本与层级信息。
+     */
+    private HeadingMatch matchHeading(String paragraph) {
+        String normalized = sanitizeUtf16(paragraph).trim();
+        if (normalized.isBlank()) {
+            return HeadingMatch.notMatched();
+        }
+
+        Matcher markdownMatcher = MARKDOWN_HEADING_PATTERN.matcher(normalized);
+        if (markdownMatcher.matches()) {
+            String title = normalizeTitle(markdownMatcher.group(2));
+            return title.isBlank() ? HeadingMatch.notMatched() : new HeadingMatch(true, title, markdownMatcher.group(1).length());
+        }
+
+        Matcher chineseMatcher = CHINESE_SECTION_HEADING_PATTERN.matcher(normalized);
+        if (chineseMatcher.matches()) {
+            String title = normalizeTitle(chineseMatcher.group(2));
+            return title.isBlank() ? HeadingMatch.notMatched() : new HeadingMatch(true, title, 2);
+        }
+
+        Matcher numericMatcher = NUMERIC_SECTION_HEADING_PATTERN.matcher(normalized);
+        if (numericMatcher.matches()) {
+            String title = normalizeTitle(numericMatcher.group(2));
+            int level = numericMatcher.group(1).chars().filter(ch -> ch == '.').map(ch -> 1).sum() + 1;
+            return title.isBlank() ? HeadingMatch.notMatched() : new HeadingMatch(true, title, level);
+        }
+
+        Matcher numericParenMatcher = NUMERIC_SECTION_HEADING_PAREN_PATTERN.matcher(normalized);
+        if (numericParenMatcher.matches()) {
+            String title = normalizeTitle(numericParenMatcher.group(1));
+            return title.isBlank() ? HeadingMatch.notMatched() : new HeadingMatch(true, title, 2);
+        }
+
+        if (isLikelyTitle(normalized) && looksLikeSectionHeading(normalized)) {
+            return new HeadingMatch(true, normalizeTitle(normalized), 2);
+        }
+        return HeadingMatch.notMatched();
+    }
+
+    /**
+     * 为短标题场景提供补充判断，降低章节标题漏识别概率。
+     */
+    private boolean looksLikeSectionHeading(String text) {
+        return text.startsWith("背景")
+            || text.startsWith("目标")
+            || text.startsWith("方案")
+            || text.startsWith("步骤")
+            || text.startsWith("总结")
+            || text.startsWith("说明")
+            || text.startsWith("问题");
+    }
+
+    /**
+     * 判断段落是否应按列表块处理。
+     */
+    private boolean isListParagraph(String paragraph) {
+        String normalized = sanitizeUtf16(paragraph).trim();
+        if (normalized.isBlank()) {
+            return false;
+        }
+        if (LIST_ITEM_PATTERN.matcher(normalized).matches()) {
+            return true;
+        }
+        return normalized.contains("\n") && Arrays.stream(normalized.split("\n"))
+            .map(String::trim)
+            .filter(line -> !line.isBlank())
+            .allMatch(line -> LIST_ITEM_PATTERN.matcher(line).matches());
+    }
+
+    /**
+     * 将列表段拆为列表项，供超长列表优先按项切分。
+     */
+    private List<String> splitListItems(String paragraph) {
+        String normalized = sanitizeUtf16(paragraph);
+        List<String> lines = Arrays.stream(normalized.split("\n"))
+            .map(String::trim)
+            .filter(line -> !line.isBlank())
+            .collect(Collectors.toList());
+        if (lines.size() > 1) {
+            return lines;
+        }
+
+        Matcher matcher = Pattern.compile("(?=(?:[-*•]|\\d+[.)]|[一二三四五六七八九十]+、|（\\d+）)\\s+").matcher(normalized);
+        List<Integer> starts = new ArrayList<>();
+        while (matcher.find()) {
+            starts.add(matcher.start());
+        }
+        if (starts.size() <= 1) {
+            return List.of(normalized.trim());
+        }
+
+        List<String> items = new ArrayList<>();
+        for (int i = 0; i < starts.size(); i++) {
+            int start = starts.get(i);
+            int end = i + 1 < starts.size() ? starts.get(i + 1) : normalized.length();
+            String item = normalized.substring(start, end).trim();
+            if (!item.isBlank()) {
+                items.add(item);
+            }
+        }
+        return items.isEmpty() ? List.of(normalized.trim()) : items;
+    }
+
+    /**
+     * 判断下一个结构化单元是否应开启新块，兼顾章节边界与块大小。
+     */
+    private boolean shouldStartNewChunk(List<StructuredUnit> currentUnits, StructuredUnit nextUnit, ChunkSettings chunkSettings) {
+        ChunkCandidate currentChunk = toChunkCandidate(currentUnits);
+        if (currentChunk.text().length() + 2 + nextUnit.text().length() > chunkSettings.maxSize()) {
+            return true;
+        }
+
+        StructuredUnit lastUnit = currentUnits.getLast();
+        if (nextUnit.unitType() == UnitType.HEADING) {
+            return !currentChunk.text().isBlank();
+        }
+        if (lastUnit.unitType() == UnitType.HEADING) {
+            return false;
+        }
+        if (isDifferentSection(currentChunk.sectionTitle(), nextUnit.sectionTitle())) {
+            return currentChunk.text().length() >= chunkSettings.minSize() / 2 || nextUnit.unitType() == UnitType.HEADING;
+        }
+        if (nextUnit.unitType() == UnitType.LIST && currentChunk.text().length() >= chunkSettings.targetSize()) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 判断两个候选块是否适合合并，避免跨章节错误拼接。
+     */
+    private boolean shouldMergeChunks(ChunkCandidate previous, ChunkCandidate current, ChunkSettings chunkSettings) {
+        if (!canMergeChunkTexts(previous.text(), current.text(), chunkSettings)) {
+            return false;
+        }
+        if (isDifferentSection(previous.sectionTitle(), current.sectionTitle())) {
+            return false;
+        }
+        if (shareSection(previous, current)) {
+            return true;
+        }
+        return previous.text().length() < chunkSettings.minSize() / 2 && current.text().length() < chunkSettings.minSize() / 2;
+    }
+
+    /**
+     * 判断两个文本块在长度约束下是否允许直接拼接。
+     */
+    private boolean canMergeChunkTexts(String previous, String current, ChunkSettings chunkSettings) {
+        return previous.length() + 2 + current.length() <= chunkSettings.maxSize() + chunkSettings.minSize() / 2;
+    }
+
+    /**
+     * 判断两个候选块是否属于同一章节。
+     */
+    private boolean shareSection(ChunkCandidate left, ChunkCandidate right) {
+        return !left.sectionTitle().isBlank() && Objects.equals(left.sectionTitle(), right.sectionTitle());
+    }
+
+    /**
+     * 判断两个章节标识是否明确指向不同章节。
+     */
+    private boolean isDifferentSection(String left, String right) {
+        return !sanitizeUtf16(left).isBlank()
+            && !sanitizeUtf16(right).isBlank()
+            && !Objects.equals(sanitizeUtf16(left), sanitizeUtf16(right));
+    }
+
+    /**
+     * 合并两个候选块，并保留原始结构化单元列表。
+     */
+    private ChunkCandidate mergeChunkCandidates(ChunkCandidate left, ChunkCandidate right) {
+        List<StructuredUnit> mergedUnits = new ArrayList<>(left.units());
+        mergedUnits.addAll(right.units());
+        return toChunkCandidate(mergedUnits);
+    }
+
+    /**
+     * 将结构化单元列表投影为候选块，汇总正文与章节信息。
+     */
+    private ChunkCandidate toChunkCandidate(List<StructuredUnit> units) {
+        String sectionTitle = units.stream()
+            .map(StructuredUnit::sectionTitle)
+            .filter(title -> !title.isBlank())
+            .findFirst()
+            .orElse("");
+        String text = units.stream()
+            .map(StructuredUnit::text)
+            .filter(content -> !content.isBlank())
+            .collect(Collectors.joining("\n\n"))
+            .trim();
+        return new ChunkCandidate(List.copyOf(units), text, sectionTitle);
+    }
+
+    /**
+     * 从清洗后的文本中提取文档级标题、分类、时间与关键词画像。
+     */
     private DocumentProfile buildDocumentProfile(String filename, String cleanedText) {
         String safeCleanedText = sanitizeUtf16(cleanedText);
         String fallbackTitle = extractTitleFromFilename(filename);
@@ -645,6 +983,9 @@ public class DocumentService {
         );
     }
 
+    /**
+     * 清洗原始文本，统一空白、换行与噪声字符。
+     */
     private String cleanText(String text) {
         String normalized = sanitizeUtf16(text)
             .replace("\uFEFF", "")
@@ -679,6 +1020,9 @@ public class DocumentService {
             .trim();
     }
 
+    /**
+     * 判断一行是否属于页码或纯符号等噪声内容。
+     */
     private boolean isNoiseLine(String line) {
         if (line.isBlank()) {
             return true;
@@ -703,6 +1047,9 @@ public class DocumentService {
         return meaningful == 0 && punctuation > 0;
     }
 
+    /**
+     * 基于长度与标点特征判断段落是否可能是标题。
+     */
     private boolean isLikelyTitle(String paragraph) {
         if (paragraph == null || paragraph.isBlank()) {
             return false;
@@ -725,6 +1072,9 @@ public class DocumentService {
         return sentenceBoundaryCount <= 1;
     }
 
+    /**
+     * 规范化标题文本，移除常见前缀与无意义标记。
+     */
     private String normalizeTitle(String title) {
         return sanitizeUtf16(title)
             .replaceFirst("^(标题[:：]\\s*)", "")
@@ -732,6 +1082,9 @@ public class DocumentService {
             .trim();
     }
 
+    /**
+     * 当正文无法稳定识别标题时，从文件名回退生成标题。
+     */
     private String extractTitleFromFilename(String filename) {
         String safeFilename = sanitizeUtf16(filename);
         String baseName = safeFilename;
@@ -745,6 +1098,9 @@ public class DocumentService {
             .trim();
     }
 
+    /**
+     * 优先从正文，其次从文件名中提取文档时间信息。
+     */
     private String extractDocumentTime(String filename, String text) {
         String extractedDate = findDate(text);
         if (extractedDate != null) {
@@ -759,6 +1115,9 @@ public class DocumentService {
         return LocalDate.now().toString();
     }
 
+    /**
+     * 从给定文本中识别标准化日期字符串。
+     */
     private String findDate(String source) {
         if (source == null || source.isBlank()) {
             return null;
@@ -784,6 +1143,9 @@ public class DocumentService {
         return null;
     }
 
+    /**
+     * 根据标题与正文关键词粗略推断文档分类。
+     */
     private String inferCategory(String title, String bodyText) {
         String corpus = (title + "\n" + bodyText).toLowerCase(Locale.ROOT);
         Map<String, List<String>> categoryKeywords = createCategoryKeywords();
@@ -807,6 +1169,9 @@ public class DocumentService {
         return bestScore >= 2 ? bestCategory : "未分类";
     }
 
+    /**
+     * 构建分类推断所使用的关键词映射表。
+     */
     private Map<String, List<String>> createCategoryKeywords() {
         Map<String, List<String>> categoryKeywords = new LinkedHashMap<>();
         categoryKeywords.put("技术", List.of(
@@ -834,6 +1199,9 @@ public class DocumentService {
         return categoryKeywords;
     }
 
+    /**
+     * 综合拉丁词与中文词片提取关键词列表。
+     */
     private List<String> extractKeywords(String text, String title, int limit) {
         Map<String, Integer> scores = new HashMap<>();
         addLatinKeywordScores(text, scores, 1);
@@ -850,6 +1218,9 @@ public class DocumentService {
             .collect(Collectors.toList());
     }
 
+    /**
+     * 为拉丁字符关键词累计权重分数。
+     */
     private void addLatinKeywordScores(String source, Map<String, Integer> scores, int weight) {
         if (source == null || source.isBlank()) {
             return;
@@ -865,6 +1236,9 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 为中文词片关键词累计权重分数。
+     */
     private void addHanKeywordScores(String source, String title, Map<String, Integer> scores, int weight) {
         if (source == null || source.isBlank()) {
             return;
@@ -888,6 +1262,9 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 校验中文关键词候选后，将其分数写入统计表。
+     */
     private void addHanKeyword(String token, String title, Map<String, Integer> scores, int weight) {
         if (token.length() < 2 || token.length() > 4) {
             return;
@@ -900,6 +1277,9 @@ public class DocumentService {
         scores.merge(token, adjustedWeight, Integer::sum);
     }
 
+    /**
+     * 判断词片是否由重复字符组成，用于过滤无效关键词。
+     */
     private boolean isRepeatedCharacters(String token) {
         char first = token.charAt(0);
         for (int i = 1; i < token.length(); i++) {
@@ -910,12 +1290,18 @@ public class DocumentService {
         return true;
     }
 
+    /**
+     * 规范化文本内容，生成用于去重比较的键。
+     */
     private String normalizeForDedup(String text) {
         return sanitizeUtf16(text)
             .toLowerCase(Locale.ROOT)
             .replaceAll("[\\s\\p{Punct}【】《》“”‘’（）()、，。！？；：·…]", "");
     }
 
+    /**
+     * 清除不成对的 UTF-16 代理项，避免后续存储与序列化异常。
+     */
     private String sanitizeUtf16(String text) {
         if (text == null || text.isEmpty()) {
             return text == null ? "" : text;
@@ -939,6 +1325,9 @@ public class DocumentService {
         return sanitized.toString();
     }
 
+    /**
+     * 归一化分块相关配置，生成可直接使用的阈值集合。
+     */
     private ChunkSettings resolveChunkSettings() {
         int maxSize = Math.max(120, chunkMaxSize);
         int minSize = Math.max(60, Math.min(chunkMinSize, maxSize));
@@ -946,6 +1335,9 @@ public class DocumentService {
         return new ChunkSettings(minSize, targetSize, maxSize);
     }
 
+    /**
+     * 判断字符是否可作为句子级边界。
+     */
     private boolean isSentenceBoundary(char value) {
         return value == '。'
             || value == '！'
@@ -957,6 +1349,9 @@ public class DocumentService {
             || value == ';';
     }
 
+    /**
+     * 判断字符是否属于中文汉字脚本。
+     */
     private boolean isHan(char value) {
         Character.UnicodeScript script = Character.UnicodeScript.of(value);
         return script == Character.UnicodeScript.HAN;
@@ -1059,6 +1454,9 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 通过字节分布特征粗略判断文本是否为 UTF-16 编码。
+     */
     private Charset detectUtf16Charset(byte[] bytes) {
         if (bytes.length < 4 || bytes.length % 2 != 0) {
             return null;
@@ -1088,6 +1486,9 @@ public class DocumentService {
         return null;
     }
 
+    /**
+     * 以严格模式按指定字符集解码文本，发现异常时直接抛错。
+     */
     private String decodeStrict(byte[] bytes, Charset charset) throws CharacterCodingException {
         CharsetDecoder decoder = charset.newDecoder()
             .onMalformedInput(CodingErrorAction.REPORT)
@@ -1096,6 +1497,9 @@ public class DocumentService {
         return buffer.toString();
     }
 
+    /**
+     * 判断字节流是否带有 UTF-8 BOM。
+     */
     private boolean hasUtf8Bom(byte[] bytes) {
         return bytes.length >= 3
             && (bytes[0] & 0xFF) == 0xEF
@@ -1103,12 +1507,18 @@ public class DocumentService {
             && (bytes[2] & 0xFF) == 0xBF;
     }
 
+    /**
+     * 判断字节流是否带有 UTF-16 LE BOM。
+     */
     private boolean hasUtf16LeBom(byte[] bytes) {
         return bytes.length >= 2
             && (bytes[0] & 0xFF) == 0xFF
             && (bytes[1] & 0xFF) == 0xFE;
     }
 
+    /**
+     * 判断字节流是否带有 UTF-16 BE BOM。
+     */
     private boolean hasUtf16BeBom(byte[] bytes) {
         return bytes.length >= 2
             && (bytes[0] & 0xFF) == 0xFE
@@ -1144,9 +1554,42 @@ public class DocumentService {
     }
 
     private record DeduplicationResult(
-        List<String> units,
+        List<StructuredUnit> units,
         int filteredDuplicateCount
     ) {
+    }
+
+    private record StructuredUnit(
+        String text,
+        String normalizedText,
+        UnitType unitType,
+        String sectionTitle,
+        int headingLevel,
+        boolean sliced
+    ) {
+    }
+
+    private record ChunkCandidate(
+        List<StructuredUnit> units,
+        String text,
+        String sectionTitle
+    ) {
+    }
+
+    private record HeadingMatch(
+        boolean matched,
+        String title,
+        int level
+    ) {
+        private static HeadingMatch notMatched() {
+            return new HeadingMatch(false, "", 0);
+        }
+    }
+
+    private enum UnitType {
+        HEADING,
+        PARAGRAPH,
+        LIST
     }
 
     private record DocumentProfile(
