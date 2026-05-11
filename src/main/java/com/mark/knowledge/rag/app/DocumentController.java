@@ -54,46 +54,42 @@ public class DocumentController {
     public ResponseEntity<?> uploadDocument(@RequestParam("file") MultipartFile file) {
         log.info("收到文档上传请求: {}", file.getOriginalFilename());
 
-        try {
-            if (file.isEmpty()) {
-                return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("无效文件", "文件为空"));
-            }
+        if (file.isEmpty()) {
+            return ResponseEntity.badRequest()
+                .body(new ErrorResponse("无效文件", "文件为空"));
+        }
 
-            String filename = file.getOriginalFilename();
-            if (filename == null || filename.isBlank()) {
-                return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("无效文件", "文件名缺失"));
-            }
+        String filename = file.getOriginalFilename();
+        if (filename == null || filename.isBlank()) {
+            return ResponseEntity.badRequest()
+                .body(new ErrorResponse("无效文件", "文件名缺失"));
+        }
 
-            String lowerFilename = filename.toLowerCase(Locale.ROOT);
-            if (!lowerFilename.endsWith(".pdf") && !lowerFilename.endsWith(".txt")) {
-                return ResponseEntity.badRequest()
-                    .body(new ErrorResponse("不支持的文件类型", "仅支持 PDF 和 TXT 文件"));
-            }
+        String lowerFilename = filename.toLowerCase(Locale.ROOT);
+        if (!lowerFilename.endsWith(".pdf") && !lowerFilename.endsWith(".txt")) {
+            return ResponseEntity.badRequest()
+                .body(new ErrorResponse("不支持的文件类型", "仅支持 PDF 和 TXT 文件"));
+        }
 
-            try (InputStream inputStream = file.getInputStream()) {
-                DocumentService.ProcessedDocument processed = documentService.processDocument(
-                    inputStream,
-                    filename
-                );
+        try (InputStream inputStream = file.getInputStream()) {
+            DocumentService.ProcessedDocument processed = documentService.processDocument(
+                inputStream,
+                filename
+            );
 
-                int embeddingCount = embeddingService.storeSegments(processed.segments());
+            int embeddingCount = embeddingService.storeSegments(processed.segments());
 
-                log.info("文档处理成功: {} ({} 个片段)", filename, embeddingCount);
+            log.info("文档处理成功: {} ({} 个片段)", filename, embeddingCount);
 
-                return ResponseEntity.ok(new DocumentResponse(
-                    processed.documentId(),
-                    filename,
-                    "文档处理成功",
-                    embeddingCount
-                ));
-            }
-
-        } catch (Exception e) {
-            log.error("文档处理失败", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ErrorResponse("处理失败", e.getMessage()));
+            return ResponseEntity.ok(new DocumentResponse(
+                processed.documentId(),
+                filename,
+                "文档处理成功",
+                embeddingCount
+            ));
+        } catch (java.io.IOException e) {
+            log.error("文档输入流读取失败", e);
+            throw new RuntimeException("文档输入流读取失败: " + e.getMessage(), e);
         }
     }
 

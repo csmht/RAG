@@ -14,6 +14,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -285,6 +287,25 @@ public class DocumentService {
         int currentHeadingLevel = 0;
 
         for (String paragraph : paragraphs) {
+            List<String> lines = Arrays.stream(paragraph.split("\\n"))
+                .map(String::trim)
+                .filter(line -> !line.isBlank())
+                .toList();
+
+            if (!lines.isEmpty()) {
+                HeadingMatch firstLineHeading = matchHeading(lines.getFirst());
+                if (firstLineHeading.matched()) {
+                    currentSectionTitle = firstLineHeading.title();
+                    currentHeadingLevel = firstLineHeading.level();
+                    units.add(createUnit(lines.getFirst(), UnitType.HEADING, currentSectionTitle, currentHeadingLevel, false));
+                    String remainingText = lines.stream().skip(1).collect(Collectors.joining("\n")).trim();
+                    if (!remainingText.isBlank()) {
+                        appendParagraphUnit(units, remainingText, currentSectionTitle, currentHeadingLevel, chunkSettings);
+                    }
+                    continue;
+                }
+            }
+
             HeadingMatch headingMatch = matchHeading(paragraph);
             if (headingMatch.matched()) {
                 currentSectionTitle = headingMatch.title();
@@ -293,19 +314,28 @@ public class DocumentService {
                 continue;
             }
 
-            UnitType unitType = isListParagraph(paragraph) ? UnitType.LIST : UnitType.PARAGRAPH;
-            if (paragraph.length() <= chunkSettings.maxSize()) {
-                units.add(createUnit(paragraph, unitType, currentSectionTitle, currentHeadingLevel, false));
-                continue;
-            }
-
-            if (unitType == UnitType.LIST) {
-                units.addAll(splitLongList(paragraph, currentSectionTitle, currentHeadingLevel, chunkSettings));
-            } else {
-                units.addAll(splitLongParagraph(paragraph, currentSectionTitle, currentHeadingLevel, unitType, chunkSettings));
-            }
+            appendParagraphUnit(units, paragraph, currentSectionTitle, currentHeadingLevel, chunkSettings);
         }
         return units;
+    }
+
+    private void appendParagraphUnit(
+            List<StructuredUnit> units,
+            String paragraph,
+            String currentSectionTitle,
+            int currentHeadingLevel,
+            ChunkSettings chunkSettings) {
+        UnitType unitType = isListParagraph(paragraph) ? UnitType.LIST : UnitType.PARAGRAPH;
+        if (paragraph.length() <= chunkSettings.maxSize()) {
+            units.add(createUnit(paragraph, unitType, currentSectionTitle, currentHeadingLevel, false));
+            return;
+        }
+
+        if (unitType == UnitType.LIST) {
+            units.addAll(splitLongList(paragraph, currentSectionTitle, currentHeadingLevel, chunkSettings));
+        } else {
+            units.addAll(splitLongParagraph(paragraph, currentSectionTitle, currentHeadingLevel, unitType, chunkSettings));
+        }
     }
 
     /**
@@ -1330,31 +1360,37 @@ public class DocumentService {
      * @throws IOException 如果PDF解析失败
      */
     private String parsePdf(InputStream inputStream) throws IOException {
-        log.debug("  正在读取PDF字节流...");
+        log.debug("  正在读取PDF文件...");
 
-        byte[] bytes = inputStream.readAllBytes();
-        log.debug("  PDF大小: {} 字节", bytes.length);
+        Path tempFile = Files.createTempFile("knowledge-upload-", ".pdf");
+        try {
+            Files.copy(inputStream, tempFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            long fileSize = Files.size(tempFile);
+            log.debug("  PDF大小: {} 字节", fileSize);
 
-        log.debug("  正在加载PDF文档...");
-        try (PDDocument document = Loader.loadPDF(bytes)) {
-            int pageCount = document.getNumberOfPages();
-            log.debug("  PDF页数: {}", pageCount);
+            log.debug("  正在加载PDF文档...");
+            try (PDDocument document = Loader.loadPDF(tempFile.toFile())) {
+                int pageCount = document.getNumberOfPages();
+                log.debug("  PDF页数: {}", pageCount);
 
-            log.debug("  正在从PDF提取文本...");
-            PDFTextStripper stripper = new PDFTextStripper();
-            stripper.setSortByPosition(true);
-            String text = stripper.getText(document);
+                log.debug("  正在从PDF提取文本...");
+                PDFTextStripper stripper = new PDFTextStripper();
+                stripper.setSortByPosition(true);
+                String text = stripper.getText(document);
 
-            String cleaned = text
-                .replaceAll("\\r\\n", "\n")
-                .replaceAll("\\s+$", "")
-                .trim();
+                String cleaned = text
+                    .replaceAll("\\r\\n", "\n")
+                    .replaceAll("\\s+$", "")
+                    .trim();
 
-            log.debug("  文本提取完成: {} 字符", cleaned.length());
-            return cleaned;
+                log.debug("  文本提取完成: {} 字符", cleaned.length());
+                return cleaned;
+            }
         } catch (Exception e) {
             log.error("PDF文档解析失败", e);
             throw new IOException("PDF解析失败: " + e.getMessage(), e);
+        } finally {
+            Files.deleteIfExists(tempFile);
         }
     }
 
@@ -1368,7 +1404,10 @@ public class DocumentService {
         log.debug("  正在读取文本文件...");
 
         try {
-            byte[] bytes = inputStream.readAllBytes();
+            byte[] bytes = inputStream.readNBytes(10 * 1024 * 1024 + 1);
+            if (bytes.length > 10 * 1024 * 1024) {
+                throw new IllegalArgumentException("文本文件过大，当前仅支持不超过 10MB 的 TXT 文件");
+            }
             String content = decodeTextBytes(bytes);
 
             log.debug("  文本文件读取成功: {} 字符", content.length());
