@@ -183,7 +183,7 @@ public class DocumentController {
      */
     private String getCurrentUsername() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
-        if (authentication != null && authentication.isAuthenticated() && 
+        if (authentication != null && authentication.isAuthenticated() &&
             !"anonymousUser".equals(authentication.getName())) {
             return authentication.getName();
         }
