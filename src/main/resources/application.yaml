@@ -4,7 +4,19 @@ spring:
   servlet:
     multipart:
       max-file-size: ${SPRING_MULTIPART_MAX_FILE_SIZE:50MB}
-      max-request-size: ${SPRING_MULTIPART_MAX_REQUEST_SIZE:50MB}
+      max-request-size: ${SPRING_MULTIPART_MAX_REQUEST_SIZE:2500MB}
+  
+  # SQLite数据库配置
+  datasource:
+    url: jdbc:sqlite:knowledge.db
+
+    driver-class-name: org.sqlite.JDBC
+    
+  jpa:
+    hibernate:
+      database-platform: org.hibernate.community.dialect.SQLiteDialect
+      ddl-auto: update
+    show-sql: false
 
 llm:
   provider: ${LLM_PROVIDER:ollama}

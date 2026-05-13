@@ -76,7 +76,7 @@ public class ChatConfig {
     @Value("${qdrant.collection-name:knowledge-base}")
     private String collectionName;
 
-    @Value("${qdrant.vector-size:1024}")
+    @Value("${qdrant.vector-size:2056}")
     private int vectorSize;
 
     @Bean
@@ -187,6 +187,7 @@ public class ChatConfig {
         var builder = OpenAiEmbeddingModel.builder()
                 .baseUrl(vllmBaseUrl)
                 .modelName(resolvedModelName)
+                .encodingFormat("float")
                 .timeout(timeout);
         if (StringUtils.hasText(vllmApiKey)) {
             builder.apiKey(vllmApiKey);

@@ -36,7 +36,7 @@ public class QdrantInitializer implements ApplicationRunner {
     @Value("${qdrant.collection-name:knowledge-base}")
     private String collectionName;
 
-    @Value("${qdrant.vector-size:1024}")
+    @Value("${qdrant.vector-size:2560}")
     private int vectorSize;
 
     @Value("${qdrant.create-collection-if-not-exists:true}")
