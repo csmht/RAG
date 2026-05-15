@@ -94,9 +94,9 @@ public class RagService {
                 cancelGenerationInternal(conversationId, "同步请求到达，取消已有流式生成");
             }
 
-            List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
-                .getRecentMessages(conversationId);
-            String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            ConversationMemoryService.ConversationMemorySnapshot memory = conversationMemoryService
+                .getMemorySnapshot(conversationId);
+            String rewrittenQuestion = rewriteQuestion(request.question(), memory);
             int requestedMaxResults = resolveRequestedMaxResults(request);
 
             long questionEmbeddingStart = System.nanoTime();
@@ -134,7 +134,7 @@ public class RagService {
                 .map(match -> match.segment().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
 
-            String prompt = buildPrompt(history, context, request.question());
+            String prompt = buildPrompt(memory, context, request.question());
             long answerStart = System.nanoTime();
             String answer = chatModel.chat(prompt);
             log.info("AI 基于知识库生成答案耗时: {} ms", elapsedMillis(answerStart));
@@ -199,9 +199,9 @@ public class RagService {
                 return;
             }
 
-            List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
-                .getRecentMessages(conversationId);
-            String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            ConversationMemoryService.ConversationMemorySnapshot memory = conversationMemoryService
+                .getMemorySnapshot(conversationId);
+            String rewrittenQuestion = rewriteQuestion(request.question(), memory);
             if (shouldAbort(generation)) {
                 return;
             }
@@ -250,7 +250,7 @@ public class RagService {
             String context = matches.stream()
                 .map(match -> match.segment().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
-            String prompt = buildPrompt(history, context, request.question());
+            String prompt = buildPrompt(memory, context, request.question());
             streamingChatModel.chat(prompt, new RagStreamingResponseHandler(generation, conversationId));
         } catch (Exception e) {
             if (generation.isCancelled() || generation.isCompleted()) {
@@ -428,41 +428,46 @@ public class RagService {
             .collect(Collectors.toList());
     }
 
-    private String rewriteQuestion(String question, List<ConversationMemoryService.ConversationMessage> history) {
-        if (history.isEmpty()) {
+    private String rewriteQuestion(String question, ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (memory == null) {
             return question;
         }
 
-        String historyText = formatHistory(history);
+        String memoryContext = buildMemoryContext(memory);
+        if (!StringUtils.hasText(memoryContext)) {
+            return question;
+        }
+
         String rewritePrompt = String.format("""
-            你需要结合历史对话，把用户当前问题改写成一个完整、独立、可用于知识库检索的问题。
+            你需要结合会话记忆，把用户当前问题改写成一个完整、独立、可用于知识库检索的问题。
             如果当前问题本身已经完整，直接原样返回，不要增加解释。
             只输出改写后的问题，不要输出其它内容。
 
-            历史对话：
+            会话记忆：
             %s
 
             当前问题：
             %s
-            """, historyText, question);
+            """, memoryContext, question);
 
         String rewritten = chatModel.chat(rewritePrompt);
         return rewritten != null && !rewritten.isBlank() ? rewritten.trim() : question;
     }
 
     private String buildPrompt(
-            List<ConversationMemoryService.ConversationMessage> history,
+            ConversationMemoryService.ConversationMemorySnapshot memory,
             String context,
             String question) {
-        String historyText = history.isEmpty() ? "无" : formatHistory(history);
+        String memoryContext = buildMemoryContext(memory);
+        String safeMemoryContext = StringUtils.hasText(memoryContext) ? memoryContext : "无";
 
         return String.format("""
             你是一个基于文档内容回答问题的助手。
-            你必须严格依据下面提供的历史对话和文档上下文回答。
+            你必须严格依据下面提供的会话记忆和文档上下文回答。
             如果上下文中没有答案，请明确说明“根据已上传文档无法回答该问题”。
             不要编造，不要补充上下文之外的事实。
 
-            历史对话：
+            会话记忆：
             %s
 
             文档上下文：
@@ -470,7 +475,30 @@ public class RagService {
 
             用户当前问题：%s
 
-            请直接给出中文答案：""", historyText, context, question);
+            请直接给出中文答案：""", safeMemoryContext, context, question);
+    }
+
+    private String buildMemoryContext(ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (memory == null) {
+            return "";
+        }
+
+        List<String> sections = new ArrayList<>();
+        if (StringUtils.hasText(memory.intent())) {
+            sections.add("当前意图：\n" + memory.intent());
+        }
+        if (memory.facts() != null && !memory.facts().isEmpty()) {
+            sections.add("已确认事实：\n" + memory.facts().stream()
+                .map(fact -> "- " + fact)
+                .collect(Collectors.joining("\n")));
+        }
+        if (StringUtils.hasText(memory.summary())) {
+            sections.add("历史摘要：\n" + memory.summary());
+        }
+        if (memory.recentMessages() != null && !memory.recentMessages().isEmpty()) {
+            sections.add("最近对话：\n" + formatHistory(memory.recentMessages()));
+        }
+        return String.join("\n\n", sections);
     }
 
     private String formatHistory(List<ConversationMemoryService.ConversationMessage> history) {

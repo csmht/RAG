@@ -61,6 +61,9 @@ rag:
   memory-window: ${RAG_MEMORY_WINDOW:6}
   session-ttl-seconds: ${RAG_SESSION_TTL_SECONDS:1800}
   memory-cleanup-interval-ms: ${RAG_MEMORY_CLEANUP_INTERVAL_MS:300000}
+  summary-max-length: ${RAG_SUMMARY_MAX_LENGTH:2000}
+  facts-max-count: ${RAG_FACTS_MAX_COUNT:8}
+  intent-max-length: ${RAG_INTENT_MAX_LENGTH:200}
   stream-timeout-ms: ${RAG_STREAM_TIMEOUT_MS:300000}
 
 logging:
