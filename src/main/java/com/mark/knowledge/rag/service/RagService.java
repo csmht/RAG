@@ -407,9 +407,13 @@ public class RagService {
         return Math.min(request.maxResults(), configuredMaxResults);
     }
 
+    /**
+     * 解析参与 BM25 重排的候选片段数量，允许首次召回放大候选范围，最终结果仍受文段上限限制。
+     */
     private int resolveCandidateMaxResults(int requestedMaxResults) {
+        int safeRequestedMaxResults = Math.max(1, requestedMaxResults);
         int candidateMultiplier = Math.max(1, rerankCandidateMultiplier);
-        return Math.max(requestedMaxResults, requestedMaxResults * candidateMultiplier);
+        return Math.max(safeRequestedMaxResults, safeRequestedMaxResults * candidateMultiplier);
     }
 
     private List<HybridMatch> rerankMatches(

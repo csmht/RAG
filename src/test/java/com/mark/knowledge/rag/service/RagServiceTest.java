@@ -16,8 +16,10 @@ import com.mark.knowledge.rag.dto.RagResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Method;
 import java.time.Instant;
@@ -27,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -129,6 +132,48 @@ class RagServiceTest {
         assertEquals("定位上传限制", snapshot.intent());
         assertEquals(List.of("系统要求上传文件大小不能超过 50MB，且仅支持 pdf 文件。"), snapshot.facts());
         assertEquals(2, snapshot.recentMessages().size());
+    }
+
+    @Test
+    void shouldAllowMoreInitialRecallButRespectConfiguredMaxResultsWhenBm25Reranking() {
+        ReflectionTestUtils.setField(ragService, "maxResults", 3);
+        ReflectionTestUtils.setField(ragService, "rerankCandidateMultiplier", 4);
+
+        Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
+        List<EmbeddingMatch<TextSegment>> matches = List.of(
+            buildMatch("m1", 0.91, "配置说明一：显存至少 16GB。", embedding),
+            buildMatch("m2", 0.89, "配置说明二：内存建议 64GB。", embedding),
+            buildMatch("m3", 0.87, "配置说明三：CPU 推荐 16 核。", embedding),
+            buildMatch("m4", 0.85, "配置说明四：磁盘建议使用 SSD。", embedding),
+            buildMatch("m5", 0.83, "配置说明五：网络带宽建议千兆。", embedding),
+            buildMatch("m6", 0.81, "配置说明六：建议预留冗余资源。", embedding),
+            buildMatch("m7", 0.79, "配置说明七：模型部署建议单独节点。", embedding),
+            buildMatch("m8", 0.77, "配置说明八：建议开启监控告警。", embedding),
+            buildMatch("m9", 0.75, "配置说明九：向量库建议独立存储。", embedding),
+            buildMatch("m10", 0.73, "配置说明十：索引构建需要额外资源。", embedding),
+            buildMatch("m11", 0.71, "配置说明十一：推理服务建议限流。", embedding),
+            buildMatch("m12", 0.69, "配置说明十二：高并发场景需扩容。", embedding)
+        );
+
+        when(chatModel.chat(any(String.class)))
+            .thenReturn("定位物理配置")
+            .thenReturn("请优先参考物理配置相关片段");
+        when(embeddingModel.embed(any(String.class))).thenReturn(Response.from(embedding));
+        when(embeddingStore.search(any(EmbeddingSearchRequest.class)))
+            .thenReturn(new EmbeddingSearchResult<>(matches));
+
+        RagResponse response = ragService.ask(new RagRequest("搭建 RAG 需要什么物理配置", "conv-bm25", 10));
+
+        ArgumentCaptor<EmbeddingSearchRequest> captor = ArgumentCaptor.forClass(EmbeddingSearchRequest.class);
+        verify(embeddingStore).search(captor.capture());
+        assertEquals(12, captor.getValue().maxResults());
+        assertEquals(3, response.sources().size());
+    }
+
+    private EmbeddingMatch<TextSegment> buildMatch(String id, double score, String text, Embedding embedding) {
+        Metadata metadata = Metadata.metadata("filename", id + ".txt");
+        TextSegment segment = TextSegment.from(text, metadata);
+        return new EmbeddingMatch<>(score, id, embedding, segment);
     }
 
     private String invokeBuildPrompt(
