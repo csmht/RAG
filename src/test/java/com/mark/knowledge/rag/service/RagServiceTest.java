@@ -1,10 +1,18 @@
 package com.mark.knowledge.rag.service;
 
-import dev.langchain4j.model.chat.ChatModel;
-import dev.langchain4j.model.chat.StreamingChatModel;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.data.document.Metadata;
+import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.output.Response;
+import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.store.embedding.EmbeddingMatch;
+import dev.langchain4j.store.embedding.EmbeddingSearchResult;
+import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
+import com.mark.knowledge.rag.dto.RagRequest;
+import com.mark.knowledge.rag.dto.RagResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -15,8 +23,11 @@ import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class RagServiceTest {
@@ -96,6 +107,31 @@ class RagServiceTest {
         assertFalse(prompt.contains("最近对话："));
     }
 
+    @Test
+    void shouldUpdateIntentAndFactsDuringAskFlow() {
+        Metadata metadata = Metadata.metadata("filename", "guide.txt");
+        TextSegment segment = TextSegment.from("系统要求上传文件大小不能超过 50MB，且仅支持 pdf 文件。", metadata);
+        Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
+        EmbeddingMatch<TextSegment> match = new EmbeddingMatch<>(0.92, "m1", embedding, segment);
+
+        when(chatModel.chat(any(String.class)))
+            .thenReturn("定位上传限制")
+            .thenReturn("文件大小不能超过 50MB\n仅支持 pdf 文件")
+            .thenReturn("请先检查文件大小与格式限制");
+        when(embeddingModel.embed(any(String.class))).thenReturn(Response.from(embedding));
+        when(embeddingStore.search(any(EmbeddingSearchRequest.class)))
+            .thenReturn(new EmbeddingSearchResult<>(List.of(match)));
+
+        RagResponse response = ragService.ask(new RagRequest("为什么上传失败", "conv-1", 3));
+        assertEquals("请先检查文件大小与格式限制", response.answer());
+
+        ConversationMemoryService memoryService = extractMemoryService();
+        ConversationMemoryService.ConversationMemorySnapshot snapshot = memoryService.getMemorySnapshot("conv-1");
+        assertEquals("定位上传限制", snapshot.intent());
+        assertEquals(List.of("文件大小不能超过 50MB", "仅支持 pdf 文件"), snapshot.facts());
+        assertEquals(2, snapshot.recentMessages().size());
+    }
+
     private String invokeBuildPrompt(
             ConversationMemoryService.ConversationMemorySnapshot memory,
             String context,
@@ -108,5 +144,15 @@ class RagServiceTest {
         );
         method.setAccessible(true);
         return (String) method.invoke(ragService, memory, context, question);
+    }
+
+    private ConversationMemoryService extractMemoryService() {
+        try {
+            var field = RagService.class.getDeclaredField("conversationMemoryService");
+            field.setAccessible(true);
+            return (ConversationMemoryService) field.get(ragService);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

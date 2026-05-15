@@ -120,6 +120,19 @@ class ConversationMemoryServiceTest {
     }
 
     @Test
+    void shouldReportSummaryCompressionThresholdReached() {
+        ConversationMemoryService service = new ConversationMemoryService(2, 1800, 2000, 8, 200);
+
+        service.appendUserMessage("compress", "问题一");
+        service.appendAssistantMessage("compress", "回答一");
+        service.appendUserMessage("compress", "问题二");
+        service.appendAssistantMessage("compress", "回答二");
+
+        assertTrue(service.shouldCompressSummary("compress"));
+        assertTrue(service.getSummarySource("compress").contains("最近对话："));
+    }
+
+    @Test
     void shouldCleanupExpiredSessions() throws InterruptedException {
         ConversationMemoryService service = new ConversationMemoryService(3, 0, 2000, 8, 200);
 

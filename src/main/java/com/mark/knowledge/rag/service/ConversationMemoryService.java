@@ -28,6 +28,9 @@ public class ConversationMemoryService {
     private final int intentMaxLength;
     private final ConcurrentHashMap<String, ConversationSession> sessions = new ConcurrentHashMap<>();
 
+    /**
+     * 使用配置参数初始化会话记忆服务。
+     */
     public ConversationMemoryService(
             @Value("${rag.memory-window:6}") int memoryWindow,
             @Value("${rag.session-ttl-seconds:1800}") long sessionTtlSeconds,
@@ -41,6 +44,9 @@ public class ConversationMemoryService {
         this.intentMaxLength = Math.max(intentMaxLength, 1);
     }
 
+    /**
+     * 获取指定会话的最近原始消息列表。
+     */
     public List<ConversationMessage> getRecentMessages(String conversationId) {
         if (conversationId == null || conversationId.isBlank()) {
             return List.of();
@@ -55,6 +61,9 @@ public class ConversationMemoryService {
         return session.snapshot();
     }
 
+    /**
+     * 获取指定会话的结构化记忆快照。
+     */
     public ConversationMemorySnapshot getMemorySnapshot(String conversationId) {
         if (conversationId == null || conversationId.isBlank()) {
             return ConversationMemorySnapshot.empty();
@@ -69,14 +78,23 @@ public class ConversationMemoryService {
         return session.snapshotMemory();
     }
 
+    /**
+     * 追加一条用户消息到指定会话。
+     */
     public void appendUserMessage(String conversationId, String content) {
         appendMessage(conversationId, ConversationRole.USER, content);
     }
 
+    /**
+     * 追加一条助手消息到指定会话。
+     */
     public void appendAssistantMessage(String conversationId, String content) {
         appendMessage(conversationId, ConversationRole.ASSISTANT, content);
     }
 
+    /**
+     * 更新指定会话的历史摘要。
+     */
     public void updateSummary(String conversationId, String summary) {
         if (conversationId == null || conversationId.isBlank()) {
             return;
@@ -86,6 +104,9 @@ public class ConversationMemoryService {
         session.updateSummary(summary);
     }
 
+    /**
+     * 更新指定会话的稳定事实列表。
+     */
     public void updateFacts(String conversationId, List<String> facts) {
         if (conversationId == null || conversationId.isBlank()) {
             return;
@@ -95,6 +116,9 @@ public class ConversationMemoryService {
         session.updateFacts(facts);
     }
 
+    /**
+     * 更新指定会话的当前意图。
+     */
     public void updateIntent(String conversationId, String intent) {
         if (conversationId == null || conversationId.isBlank()) {
             return;
@@ -104,6 +128,35 @@ public class ConversationMemoryService {
         session.updateIntent(intent);
     }
 
+    /**
+     * 判断指定会话的最近消息是否已达到压缩阈值。
+     */
+    public boolean shouldCompressSummary(String conversationId) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return false;
+        }
+        ConversationSession session = sessions.get(conversationId);
+        return session != null && session.shouldCompress(memoryWindow);
+    }
+
+    /**
+     * 获取用于摘要压缩的完整会话文本视图。
+     */
+    public String getSummarySource(String conversationId) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return "";
+        }
+        ConversationSession session = sessions.get(conversationId);
+        if (session == null) {
+            return "";
+        }
+        session.touch();
+        return session.summarySource();
+    }
+
+    /**
+     * 清空指定会话的全部记忆内容。
+     */
     public void clear(String conversationId) {
         if (conversationId == null || conversationId.isBlank()) {
             return;
@@ -111,6 +164,9 @@ public class ConversationMemoryService {
         sessions.remove(conversationId);
     }
 
+    /**
+     * 清理超过存活时间的会话记忆。
+     */
     @Scheduled(fixedDelayString = "${rag.memory-cleanup-interval-ms:300000}")
     public void cleanupExpiredSessions() {
         Instant expireBefore = Instant.now().minusSeconds(sessionTtlSeconds);
@@ -209,6 +265,35 @@ public class ConversationMemoryService {
             touch();
         }
 
+        /**
+         * 判断当前最近消息是否已达到摘要压缩阈值。
+         */
+        private synchronized boolean shouldCompress(int memoryWindow) {
+            int maxMessages = Math.max(memoryWindow, 1) * 2;
+            return recentMessages.size() >= maxMessages;
+        }
+
+        /**
+         * 生成用于摘要压缩的完整会话文本视图。
+         */
+        private synchronized String summarySource() {
+            List<String> sections = new ArrayList<>();
+            if (summary != null && !summary.isBlank()) {
+                sections.add("历史摘要：\n" + summary);
+            }
+            if (!recentMessages.isEmpty()) {
+                String recentText = recentMessages.stream()
+                    .map(message -> (message.role() == ConversationRole.USER ? "用户：" : "助手：") + message.content())
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+                sections.add("最近对话：\n" + recentText);
+            }
+            return String.join("\n\n", sections);
+        }
+
+        /**
+         * 按窗口大小裁剪最近消息，并将溢出消息沉淀到摘要中。
+         */
         private synchronized void trimToWindow(int memoryWindow) {
             int maxMessages = Math.max(memoryWindow, 1) * 2;
             while (recentMessages.size() > maxMessages) {

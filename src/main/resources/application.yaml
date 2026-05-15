@@ -64,6 +64,14 @@ rag:
   summary-max-length: ${RAG_SUMMARY_MAX_LENGTH:2000}
   facts-max-count: ${RAG_FACTS_MAX_COUNT:8}
   intent-max-length: ${RAG_INTENT_MAX_LENGTH:200}
+  summary-compress-threshold-ratio: ${RAG_SUMMARY_COMPRESS_THRESHOLD_RATIO:1.0}
+  memory-fact-score-threshold: ${RAG_MEMORY_FACT_SCORE_THRESHOLD:0.6}
+  memory-max-facts-per-update: ${RAG_MEMORY_MAX_FACTS_PER_UPDATE:3}
+  memory-top-match-max-length: ${RAG_MEMORY_TOP_MATCH_MAX_LENGTH:300}
+  memory-intent-max-source-length: ${RAG_MEMORY_INTENT_MAX_SOURCE_LENGTH:500}
+  memory-summary-source-max-length: ${RAG_MEMORY_SUMMARY_SOURCE_MAX_LENGTH:4000}
+  memory-summary-enabled: ${RAG_MEMORY_SUMMARY_ENABLED:true}
+  memory-summary-model-enabled: ${RAG_MEMORY_SUMMARY_MODEL_ENABLED:true}
   stream-timeout-ms: ${RAG_STREAM_TIMEOUT_MS:300000}
 
 logging:
