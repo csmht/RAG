@@ -2,6 +2,9 @@ package com.mark.knowledge.rag.service;
 
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.segment.TextSegment;
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -9,11 +12,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.wltea.analyzer.lucene.IKAnalyzer;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.StringReader;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
@@ -39,8 +42,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * 文档服务 - 文档处理和分块
- *
+ * 文档服务 - 文档处理和分块*
  * 服务职责：
  * - 处理文档输入（解析、清洗、增强和分块）
  * - 支持多种格式（PDF、TXT）
@@ -88,6 +90,21 @@ public class DocumentService {
     @Value("${rag.keyword-count:6}")
     private int keywordCount;
 
+    @Value("${rag.keyword-min-token-length:2}")
+    private int keywordMinTokenLength;
+
+    @Value("${rag.keyword-min-occurrences:2}")
+    private int keywordMinOccurrences;
+
+    @Value("${rag.keyword-chunk-ratio-threshold:0.6}")
+    private double keywordChunkRatioThreshold;
+
+    @Value("${rag.keyword-max-candidate-multiplier:4}")
+    private int keywordMaxCandidateMultiplier;
+
+    @Value("${rag.keyword-use-smart-ik:true}")
+    private boolean keywordUseSmartIk;
+
     /**
      * 处理输入流中的文档
      *
@@ -107,8 +124,6 @@ public class DocumentService {
         log.info("  重叠大小: {}", chunkOverlap);
         log.info("==========================================");
 
-        String documentId = UUID.randomUUID().toString();
-
         try {
             log.info("📖 [步骤1/4] 解析文档: {}", filename);
             long parseStart = System.currentTimeMillis();
@@ -124,51 +139,7 @@ public class DocumentService {
 
             long parseTime = System.currentTimeMillis() - parseStart;
             log.info("  解析完成，耗时: {} ms", parseTime);
-
-            if (rawContent.isBlank()) {
-                throw new IllegalArgumentException("文档内容为空");
-            }
-
-            log.info("🧹 [步骤2/4] 清洗文本并提取元数据...");
-            long cleanStart = System.currentTimeMillis();
-            String cleanedContent = cleanText(rawContent);
-            if (cleanedContent.isBlank()) {
-                throw new IllegalArgumentException("文本清洗后内容为空");
-            }
-
-            DocumentProfile profile = buildDocumentProfile(filename, cleanedContent);
-            long cleanTime = System.currentTimeMillis() - cleanStart;
-            log.info("✓ 文本清洗完成，耗时: {} ms", cleanTime);
-            log.info("  清洗前长度: {} 字符", rawContent.length());
-            log.info("  清洗后长度: {} 字符", profile.bodyText().length());
-            log.info("  标题: {}", profile.title());
-            log.info("  分类: {}", profile.category());
-            log.info("  时间: {}", profile.documentTime());
-
-            log.info("✂️  [步骤3/4] 切分文本块并做增强...");
-            long splitStart = System.currentTimeMillis();
-            ChunkBuildResult chunkBuildResult = splitText(profile, filename, documentId, chunkSettings);
-            List<TextSegment> segments = chunkBuildResult.segments();
-            long splitTime = System.currentTimeMillis() - splitStart;
-
-            log.info("✓ 文档已切分为 {} 个文本块，耗时: {} ms", segments.size(), splitTime);
-            log.info("  过滤短文本: {} 个", chunkBuildResult.filteredShortCount());
-            log.info("  过滤重复文本: {} 个", chunkBuildResult.filteredDuplicateCount());
-            log.info("  平均块原文大小: {} 字符",
-                profile.bodyText().length() / Math.max(1, segments.size()));
-
-            log.info("📦 [步骤4/4] 创建处理后的文档结果");
-            ProcessedDocument result = new ProcessedDocument(documentId, filename, segments);
-
-            long totalTime = System.currentTimeMillis() - startTime;
-            log.info("==========================================");
-            log.info("文档处理完成");
-            log.info("  文档ID: {}", documentId);
-            log.info("  文本块总数: {}", segments.size());
-            log.info("  总耗时: {} ms", totalTime);
-            log.info("==========================================");
-
-            return result;
+            return processRawContent(rawContent, filename, startTime, chunkSettings);
 
         } catch (Exception e) {
             long totalTime = System.currentTimeMillis() - startTime;
@@ -182,6 +153,78 @@ public class DocumentService {
         }
     }
 
+    /**
+     * 处理纯文本内容（用于多格式文件服务）
+     *
+     * @param textContent 文本内容
+     * @param filename 文件名
+     * @return 处理后的文本片段
+     */
+    public List<dev.langchain4j.data.segment.TextSegment> processDocumentContent(String textContent, String filename) {
+        if (textContent == null || textContent.trim().isEmpty()) {
+            return List.of();
+        }
+
+        try {
+            return processRawContent(textContent, filename, System.currentTimeMillis(), resolveChunkSettings()).segments();
+        } catch (Exception e) {
+            log.error("处理文本内容失败", e);
+            return List.of();
+        }
+    }
+
+    /**
+     * 复用统一主流程处理原始文本内容，确保不同入口的清洗、分块与关键词增强行为一致。
+     */
+    private ProcessedDocument processRawContent(String rawContent, String filename, long startTime, ChunkSettings chunkSettings) {
+        if (rawContent == null || rawContent.isBlank()) {
+            throw new IllegalArgumentException("文档内容为空");
+        }
+
+        String documentId = UUID.randomUUID().toString();
+        log.info("🧹 [步骤2/4] 清洗文本并提取元数据...");
+        long cleanStart = System.currentTimeMillis();
+        String cleanedContent = cleanText(rawContent);
+        if (cleanedContent.isBlank()) {
+            throw new IllegalArgumentException("文本清洗后内容为空");
+        }
+
+        DocumentProfile profile = buildDocumentProfile(filename, cleanedContent);
+        long cleanTime = System.currentTimeMillis() - cleanStart;
+        log.info("✓ 文本清洗完成，耗时: {} ms", cleanTime);
+        log.info("  清洗前长度: {} 字符", rawContent.length());
+        log.info("  清洗后长度: {} 字符", profile.bodyText().length());
+        log.info("  标题: {}", profile.title());
+        log.info("  分类: {}", profile.category());
+        log.info("  时间: {}", profile.documentTime());
+
+        log.info("✂️  [步骤3/4] 切分文本块并做增强...");
+        long splitStart = System.currentTimeMillis();
+        ChunkBuildResult chunkBuildResult = splitText(profile, filename, documentId, chunkSettings);
+        List<TextSegment> segments = chunkBuildResult.segments();
+        long splitTime = System.currentTimeMillis() - splitStart;
+
+        log.info("✓ 文档已切分为 {} 个文本块，耗时: {} ms", segments.size(), splitTime);
+        log.info("  过滤短文本: {} 个", chunkBuildResult.filteredShortCount());
+        log.info("  过滤重复文本: {} 个", chunkBuildResult.filteredDuplicateCount());
+        log.info("  平均块原文大小: {} 字符", profile.bodyText().length() / Math.max(1, segments.size()));
+
+        log.info("📦 [步骤4/4] 创建处理后的文档结果");
+        ProcessedDocument result = new ProcessedDocument(documentId, filename, segments);
+
+        long totalTime = System.currentTimeMillis() - startTime;
+        log.info("==========================================");
+        log.info("文档处理完成");
+        log.info("  文档ID: {}", documentId);
+        log.info("  文本块总数: {}", segments.size());
+        log.info("  总耗时: {} ms", totalTime);
+        log.info("==========================================");
+        return result;
+    }
+
+    /**
+     * 按分块配置切分正文，并为每个有效分块补充专属关键词与元数据。
+     */
     private ChunkBuildResult splitText(
             DocumentProfile profile,
             String filename,
@@ -195,9 +238,9 @@ public class DocumentService {
 
         List<TextSegment> segments = new ArrayList<>();
         Set<String> seenChunks = new HashSet<>();
+        List<ChunkCandidate> validChunks = new ArrayList<>();
         int filteredShortCount = 0;
         int filteredDuplicateCount = unitDeduplication.filteredDuplicateCount();
-        int chunkIndex = 0;
 
         for (String chunk : chunks) {
             String normalizedChunk = normalizeForDedup(chunk);
@@ -211,15 +254,21 @@ public class DocumentService {
                 continue;
             }
 
-            List<String> chunkKeywords = resolveChunkKeywords(profile, chunk);
-            String enhancedText = buildEnhancedText(profile.title(), chunk, chunkKeywords);
+            validChunks.add(new ChunkCandidate(chunk, normalizedChunk));
+        }
+
+        Map<String, Integer> documentTermFrequency = buildTermFrequency(profile.bodyText());
+        int chunkIndex = 0;
+        for (ChunkCandidate candidate : validChunks) {
+            List<String> chunkKeywords = resolveChunkKeywords(profile, candidate.chunk(), documentTermFrequency);
+            String enhancedText = buildEnhancedText(profile.title(), candidate.chunk(), chunkKeywords);
             segments.add(createSegment(
                 enhancedText,
-                chunk,
+                candidate.chunk(),
                 filename,
                 documentId,
                 chunkIndex++,
-                normalizedChunk,
+                candidate.normalizedChunk(),
                 profile,
                 chunkKeywords
             ));
@@ -233,6 +282,9 @@ public class DocumentService {
         return new ChunkBuildResult(segments, filteredShortCount, filteredDuplicateCount);
     }
 
+    /**
+     * 按归一化结果去除重复文本单元，避免相同内容重复进入后续组块流程。
+     */
     private DeduplicationResult deduplicateUnits(List<String> units) {
         List<String> uniqueUnits = new ArrayList<>();
         Set<String> seenUnits = new HashSet<>();
@@ -253,6 +305,9 @@ public class DocumentService {
         return new DeduplicationResult(uniqueUnits, filteredDuplicateCount);
     }
 
+    /**
+     * 先按自然段拆分正文，对超长段落再继续细分为可组块的文本单元。
+     */
     private List<String> splitIntoUnits(String text, ChunkSettings chunkSettings) {
         List<String> paragraphs = Arrays.stream(text.split("\\n\\n+"))
             .map(String::trim)
@@ -271,6 +326,9 @@ public class DocumentService {
         return units;
     }
 
+    /**
+     * 以句号、问号等边界优先切分超长段落，尽量保持语义完整。
+     */
     private List<String> splitLongParagraph(String paragraph, ChunkSettings chunkSettings) {
         List<String> units = new ArrayList<>();
         String[] sentences = paragraph.split("(?<=[。！？!?；;])");
@@ -312,6 +370,9 @@ public class DocumentService {
         return units;
     }
 
+    /**
+     * 对单句级超长文本按长度窗口切片，并保留适度重叠降低语义断裂。
+     */
     private List<String> sliceLongText(String text, ChunkSettings chunkSettings) {
         List<String> slices = new ArrayList<>();
         int overlap = Math.max(0, Math.min(chunkOverlap, chunkSettings.minSize() / 2));
@@ -344,6 +405,9 @@ public class DocumentService {
         return slices;
     }
 
+    /**
+     * 在候选截断区间内寻找更自然的断点，优先落在句末或空白处。
+     */
     private int findBoundary(String text, int minIndex, int maxIndex) {
         for (int i = maxIndex; i > minIndex; i--) {
             char current = text.charAt(i - 1);
@@ -354,6 +418,9 @@ public class DocumentService {
         return maxIndex;
     }
 
+    /**
+     * 将文本单元按目标大小顺序拼接成初始分块，控制单块长度不超过上限。
+     */
     private List<String> assembleChunks(List<String> units, ChunkSettings chunkSettings) {
         List<String> chunks = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -384,6 +451,9 @@ public class DocumentService {
         return chunks;
     }
 
+    /**
+     * 合并过短分块，避免片段过碎导致检索语义不足。
+     */
     private List<String> mergeShortChunks(List<String> chunks, ChunkSettings chunkSettings) {
         if (chunks.isEmpty()) {
             return List.of();
@@ -421,6 +491,9 @@ public class DocumentService {
         return merged;
     }
 
+    /**
+     * 为单个分块构建入库片段，并补齐标题、分类、时间与关键词等元数据。
+     */
     private TextSegment createSegment(
             String enhancedText,
             String rawText,
@@ -446,40 +519,124 @@ public class DocumentService {
         return TextSegment.from(sanitizeUtf16(enhancedText), metadata);
     }
 
+    /**
+     * 构建供向量化使用的增强文本，优先突出段落专属关键词。
+     */
     private String buildEnhancedText(String title, String chunk, List<String> chunkKeywords) {
         StringBuilder builder = new StringBuilder();
+        if (!chunkKeywords.isEmpty()) {
+            builder.append("【段落关键词：").append(String.join(", ", chunkKeywords)).append("】\n");
+        }
         builder.append("【标题：").append(title).append("】\n");
         builder.append(chunk.trim());
-        if (!chunkKeywords.isEmpty()) {
-            builder.append("\n关键词：").append(String.join(", ", chunkKeywords));
-        }
         return sanitizeUtf16(builder.toString());
     }
 
-    private List<String> resolveChunkKeywords(DocumentProfile profile, String chunk) {
-        LinkedHashSet<String> resolved = new LinkedHashSet<>();
-        if (!"未分类".equals(profile.category())) {
-            resolved.add(profile.category());
+    /**
+     * 统计文本词频，作为分块专属关键词的全局频率基准。
+     */
+    private Map<String, Integer> buildTermFrequency(String text) {
+        Map<String, Integer> frequency = new HashMap<>();
+        for (String term : tokenizeTerms(text)) {
+            frequency.merge(term, 1, Integer::sum);
         }
+        return frequency;
+    }
 
+    /**
+     * 优先解析满足“分块频次 / 全文频次”阈值的专属关键词，再按需补充块内高频词与文档公共词。
+     */
+    private List<String> resolveChunkKeywords(
+            DocumentProfile profile,
+            String chunk,
+            Map<String, Integer> documentTermFrequency) {
+        Map<String, Integer> chunkTermFrequency = buildTermFrequency(chunk);
         String chunkLower = chunk.toLowerCase(Locale.ROOT);
-        for (String keyword : profile.keywords()) {
-            if (chunkLower.contains(keyword.toLowerCase(Locale.ROOT))) {
-                resolved.add(keyword);
+        List<KeywordCandidateScore> candidates = chunkTermFrequency.entrySet().stream()
+            .filter(entry -> isChunkKeywordCandidate(entry.getKey()))
+            .map(entry -> toKeywordCandidateScore(entry, documentTermFrequency, profile.title()))
+            .sorted((left, right) -> Double.compare(right.score(), left.score()))
+            .toList();
+
+        List<String> resolved = new ArrayList<>();
+        for (KeywordCandidateScore candidate : candidates) {
+            if (candidate.chunkCount() < keywordMinOccurrences) {
+                continue;
             }
+            if (candidate.ratio() < keywordChunkRatioThreshold) {
+                continue;
+            }
+            if (isTitleSharedKeyword(profile.title(), candidate.keyword()) || resolved.contains(candidate.keyword())) {
+                continue;
+            }
+            resolved.add(candidate.keyword());
             if (resolved.size() >= keywordCount) {
-                return new ArrayList<>(resolved);
+                return resolved;
             }
         }
 
-        for (String keyword : extractKeywords(profile.title() + "\n" + chunk, profile.title(), keywordCount)) {
+        for (String keyword : profile.keywords()) {
+            if (!chunkLower.contains(keyword.toLowerCase(Locale.ROOT)) || resolved.contains(keyword)) {
+                continue;
+            }
             resolved.add(keyword);
             if (resolved.size() >= keywordCount) {
-                break;
+                return resolved;
             }
         }
 
-        return new ArrayList<>(resolved);
+        for (KeywordCandidateScore candidate : candidates) {
+            if (resolved.contains(candidate.keyword()) || isTitleSharedKeyword(profile.title(), candidate.keyword())) {
+                continue;
+            }
+            resolved.add(candidate.keyword());
+            if (resolved.size() >= keywordCount) {
+                return resolved;
+            }
+        }
+        return resolved;
+    }
+
+    /**
+     * 过滤不适合作为段落专属词的候选关键词。
+     */
+    private boolean isChunkKeywordCandidate(String keyword) {
+        if (keyword == null || keyword.isBlank()) {
+            return false;
+        }
+        String trimmedKeyword = keyword.trim();
+        if (KEYWORD_STOP_WORDS.contains(trimmedKeyword.toLowerCase(Locale.ROOT)) || isRepeatedCharacters(trimmedKeyword)) {
+            return false;
+        }
+        boolean containsHan = trimmedKeyword.codePoints().anyMatch(codePoint -> Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN);
+        if (containsHan) {
+            return trimmedKeyword.length() >= Math.max(2, keywordMinTokenLength);
+        }
+        return trimmedKeyword.length() >= Math.max(3, keywordMinTokenLength);
+    }
+
+    /**
+     * 判断关键词是否属于文档标题中的公共主题词，避免其压制段落专属词。
+     */
+    private boolean isTitleSharedKeyword(String title, String keyword) {
+        return title != null && !title.isBlank() && keyword != null && !keyword.isBlank() && title.contains(keyword);
+    }
+
+    /**
+     * 生成关键词候选得分对象，综合分块频次、全文频次、占比和词长做排序。
+     */
+    private KeywordCandidateScore toKeywordCandidateScore(
+            Map.Entry<String, Integer> chunkEntry,
+            Map<String, Integer> documentTermFrequency,
+            String title) {
+        int chunkCount = chunkEntry.getValue();
+        int documentCount = documentTermFrequency.getOrDefault(chunkEntry.getKey(), 0);
+        double ratio = documentCount <= 0 ? 0.0 : (double) chunkCount / documentCount;
+        double score = ratio * 1000 + chunkCount * 10 + chunkEntry.getKey().length();
+        if (isTitleSharedKeyword(title, chunkEntry.getKey())) {
+            score -= 100;
+        }
+        return new KeywordCandidateScore(chunkEntry.getKey(), chunkCount, documentCount, ratio, score);
     }
 
     private DocumentProfile buildDocumentProfile(String filename, String cleanedText) {
@@ -706,10 +863,8 @@ public class DocumentService {
 
     private List<String> extractKeywords(String text, String title, int limit) {
         Map<String, Integer> scores = new HashMap<>();
-        addLatinKeywordScores(text, scores, 1);
-        addLatinKeywordScores(title, scores, 5);
-        addHanKeywordScores(text, title, scores, 1);
-        addHanKeywordScores(title, title, scores, 6);
+        addTokenScores(text, scores, 1);
+        addTokenScores(title, scores, 5);
 
         return scores.entrySet().stream()
             .filter(entry -> entry.getValue() > 1)
@@ -720,54 +875,99 @@ public class DocumentService {
             .collect(Collectors.toList());
     }
 
-    private void addLatinKeywordScores(String source, Map<String, Integer> scores, int weight) {
-        if (source == null || source.isBlank()) {
-            return;
-        }
-
-        Matcher matcher = LATIN_TOKEN_PATTERN.matcher(source.toLowerCase(Locale.ROOT));
-        while (matcher.find()) {
-            String token = matcher.group();
-            if (KEYWORD_STOP_WORDS.contains(token)) {
-                continue;
-            }
+    /**
+     * 统一累计中英文词项分数，供文档级关键词提取复用。
+     */
+    private void addTokenScores(String source, Map<String, Integer> scores, int weight) {
+        for (String token : tokenizeTerms(source)) {
             scores.merge(token, weight, Integer::sum);
         }
     }
 
-    private void addHanKeywordScores(String source, String title, Map<String, Integer> scores, int weight) {
+    /**
+     * 对输入文本执行中英文分词，供关键词提取与词频统计共用。
+     */
+    private List<String> tokenizeTerms(String source) {
         if (source == null || source.isBlank()) {
-            return;
+            return List.of();
         }
 
-        String titleText = title == null ? "" : title;
+        List<String> tokens = new ArrayList<>();
+        tokens.addAll(tokenizeChineseTerms(source));
+        tokens.addAll(tokenizeLatinTerms(source));
+        return tokens.stream().filter(this::isChunkKeywordCandidate).toList();
+    }
+
+    /**
+     * 使用 IKAnalyzer 提取中文词项，提升中文术语识别质量。
+     */
+    private List<String> tokenizeChineseTerms(String source) {
+        List<String> tokens = new ArrayList<>();
+        try (Analyzer analyzer = new IKAnalyzer(keywordUseSmartIk);
+             TokenStream tokenStream = analyzer.tokenStream("chunk", new StringReader(source))) {
+            CharTermAttribute termAttribute = tokenStream.addAttribute(CharTermAttribute.class);
+            tokenStream.reset();
+            while (tokenStream.incrementToken()) {
+                String token = termAttribute.toString().trim();
+                if (isChunkKeywordCandidate(token) && !isPureNumber(token)) {
+                    tokens.add(token);
+                }
+            }
+            tokenStream.end();
+        } catch (IOException e) {
+            log.warn("IKAnalyzer 分词失败，回退到正则中文切词: {}", e.getMessage());
+        }
+        tokens.addAll(extractHanPhraseCandidates(source));
+        return tokens;
+    }
+
+    /**
+     * 补充提取 2 到 4 字中文短语，避免复合业务词被分词器完全拆散。
+     */
+    private List<String> extractHanPhraseCandidates(String source) {
+        List<String> tokens = new ArrayList<>();
         Matcher matcher = HAN_SEQUENCE_PATTERN.matcher(source);
         while (matcher.find()) {
-            String sequence = matcher.group();
+            String sequence = matcher.group().trim();
             if (sequence.length() <= 4) {
-                addHanKeyword(sequence, titleText, scores, weight);
+                if (isChunkKeywordCandidate(sequence)) {
+                    tokens.add(sequence);
+                }
                 continue;
             }
-
             int maxLength = Math.min(4, sequence.length());
             for (int tokenLength = 2; tokenLength <= maxLength; tokenLength++) {
                 for (int i = 0; i <= sequence.length() - tokenLength; i++) {
-                    addHanKeyword(sequence.substring(i, i + tokenLength), titleText, scores, weight);
+                    String token = sequence.substring(i, i + tokenLength);
+                    if (isChunkKeywordCandidate(token)) {
+                        tokens.add(token);
+                    }
                 }
             }
         }
+        return tokens;
     }
 
-    private void addHanKeyword(String token, String title, Map<String, Integer> scores, int weight) {
-        if (token.length() < 2 || token.length() > 4) {
-            return;
+    /**
+     * 提取英文与技术缩写词项，弥补中文分词器对技术标识符的覆盖不足。
+     */
+    private List<String> tokenizeLatinTerms(String source) {
+        List<String> tokens = new ArrayList<>();
+        Matcher matcher = LATIN_TOKEN_PATTERN.matcher(source.toLowerCase(Locale.ROOT));
+        while (matcher.find()) {
+            String token = matcher.group().trim();
+            if (isChunkKeywordCandidate(token)) {
+                tokens.add(token);
+            }
         }
-        if (KEYWORD_STOP_WORDS.contains(token) || isRepeatedCharacters(token)) {
-            return;
-        }
+        return tokens;
+    }
 
-        int adjustedWeight = title.contains(token) ? weight + 3 : weight;
-        scores.merge(token, adjustedWeight, Integer::sum);
+    /**
+     * 判断词项是否为纯数字，避免编号类噪声进入关键词集合。
+     */
+    private boolean isPureNumber(String token) {
+        return token != null && token.chars().allMatch(Character::isDigit);
     }
 
     private boolean isRepeatedCharacters(String token) {
@@ -1013,9 +1213,24 @@ public class DocumentService {
     ) {
     }
 
+    private record ChunkCandidate(
+        String chunk,
+        String normalizedChunk
+    ) {
+    }
+
     private record DeduplicationResult(
         List<String> units,
         int filteredDuplicateCount
+    ) {
+    }
+
+    private record KeywordCandidateScore(
+        String keyword,
+        int chunkCount,
+        int documentCount,
+        double ratio,
+        double score
     ) {
     }
 

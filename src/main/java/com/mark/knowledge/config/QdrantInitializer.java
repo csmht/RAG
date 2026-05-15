@@ -36,7 +36,7 @@ public class QdrantInitializer implements ApplicationRunner {
     @Value("${qdrant.collection-name:knowledge-base}")
     private String collectionName;
 
-    @Value("${qdrant.vector-size:1024}")
+    @Value("${qdrant.vector-size:2560}")
     private int vectorSize;
 
     @Value("${qdrant.create-collection-if-not-exists:true}")
@@ -117,25 +117,12 @@ public class QdrantInitializer implements ApplicationRunner {
 
             if (result != null && result.containsKey("result")) {
                 Map<String, Object> resultMap = (Map<String, Object>) result.get("result");
-                Map<String, Object> params = (Map<String, Object>) resultMap.get("params");
-
-                // 检查 params 是否为 null
-                if (params == null) {
-                    log.warn("⚠️  集合 '{}' 的 params 为 null，尝试获取配置", collectionName);
-                    // 尝试从 config 中获取
-                    Map<String, Object> config = (Map<String, Object>) resultMap.get("config");
-                    if (config != null && config.containsKey("params")) {
-                        params = (Map<String, Object>) config.get("params");
-                    }
+                Map<String, Object> params = readCollectionParams(resultMap);
+                Integer resolvedVectorSize = extractVectorSize(params);
+                if (resolvedVectorSize != null) {
+                    return new CollectionInfo(resolvedVectorSize);
                 }
-
-                if (params != null && params.containsKey("vectors")) {
-                    Map<String, Object> vectors = (Map<String, Object>) params.get("vectors");
-                    if (vectors != null && vectors.containsKey("size")) {
-                        Number size = (Number) vectors.get("size");
-                        return new CollectionInfo(size.intValue());
-                    }
-                }
+                log.warn("未能从集合 '{}' 的响应中解析向量维度", collectionName);
             }
 
             return null;
@@ -144,6 +131,76 @@ public class QdrantInitializer implements ApplicationRunner {
             log.debug("集合检查异常: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 读取集合参数配置。
+     *
+     * @param resultMap 集合详情响应体
+     * @return 集合参数配置
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readCollectionParams(Map<String, Object> resultMap) {
+        Map<String, Object> params = castToMap(resultMap.get("params"));
+        if (params != null) {
+            return params;
+        }
+
+        log.warn("集合 '{}' 的 params 为 null，尝试从 config.params 获取配置", collectionName);
+        Map<String, Object> config = castToMap(resultMap.get("config"));
+        if (config == null) {
+            return null;
+        }
+        return castToMap(config.get("params"));
+    }
+
+    /**
+     * 提取集合向量维度。
+     *
+     * @param params 集合参数配置
+     * @return 向量维度
+     */
+    @SuppressWarnings("unchecked")
+    private Integer extractVectorSize(Map<String, Object> params) {
+        if (params == null) {
+            return null;
+        }
+
+        Object vectorsConfig = params.get("vectors");
+        if (vectorsConfig instanceof Map<?, ?> vectors) {
+            Object size = vectors.get("size");
+            if (size instanceof Number number) {
+                return number.intValue();
+            }
+            return null;
+        }
+
+        if (vectorsConfig instanceof Number number) {
+            return number.intValue();
+        }
+
+        Map<String, Object> vectors = castToMap(params.get("vectors_config"));
+        if (vectors != null) {
+            Object size = vectors.get("size");
+            if (size instanceof Number number) {
+                return number.intValue();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 将对象安全转换为 Map。
+     *
+     * @param value 待转换对象
+     * @return 转换后的 Map
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> castToMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        return null;
     }
 
     /**

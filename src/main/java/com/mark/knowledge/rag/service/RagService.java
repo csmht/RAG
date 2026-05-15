@@ -3,6 +3,7 @@ package com.mark.knowledge.rag.service;
 import com.mark.knowledge.rag.dto.RagRequest;
 import com.mark.knowledge.rag.dto.RagResponse;
 import com.mark.knowledge.rag.dto.SourceReference;
+import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
@@ -29,6 +30,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,24 +45,51 @@ public class RagService {
 
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
     private static final String EMPTY_MATCH_ANSWER = "未在已上传文档中检索到足够相关的内容，请根据文档内容重新提问。";
+    private static final Pattern CONTEXT_REFERENCE_PATTERN = Pattern.compile("(这个|这个问题|这个方案|这个接口|这个方法|这个类|这个配置|这里|这一步|这块|该|它|其|他们|它们|那|那个|那段|那种|上述|上面|前者|后者)");
+    private static final Pattern FOLLOW_UP_ACTION_PATTERN = Pattern.compile("^(继续|再说|展开|补充|对比|比较|细说|详细说说|具体说说|接着说|然后呢|还有呢)");
+    private static final Pattern QUESTION_WORD_PATTERN = Pattern.compile("(什么|为何|为什么|怎么|如何|多少|哪些|哪种|哪个|是否|能否|可否|有无|多久)");
 
     @Value("${rag.max-results:5}")
-    private int maxResults;
+    private int maxResults = 5;
 
     @Value("${rag.min-score:0.5}")
-    private double minScore;
+    private double minScore = 0.5;
 
     @Value("${rag.stream-timeout-ms:300000}")
-    private long streamTimeoutMs;
+    private long streamTimeoutMs = 300000L;
+
+    @Value("${rag.summary-compress-threshold-ratio:1.0}")
+    private double summaryCompressThresholdRatio = 1.0;
+
+    @Value("${rag.memory-fact-score-threshold:0.6}")
+    private double memoryFactScoreThreshold = 0.6;
+
+    @Value("${rag.memory-max-facts-per-update:3}")
+    private int memoryMaxFactsPerUpdate = 3;
+
+    @Value("${rag.memory-top-match-max-length:300}")
+    private int memoryTopMatchMaxLength = 300;
+
+    @Value("${rag.memory-intent-max-source-length:500}")
+    private int memoryIntentMaxSourceLength = 500;
+
+    @Value("${rag.memory-summary-source-max-length:4000}")
+    private int memorySummarySourceMaxLength = 4000;
+
+    @Value("${rag.memory-summary-enabled:true}")
+    private boolean memorySummaryEnabled = true;
+
+    @Value("${rag.memory-summary-model-enabled:true}")
+    private boolean memorySummaryModelEnabled = true;
 
     @Value("${rag.rerank.candidate-multiplier:4}")
-    private int rerankCandidateMultiplier;
+    private int rerankCandidateMultiplier = 4;
 
     @Value("${rag.rerank.vector-weight:0.6}")
-    private double vectorWeight;
+    private double vectorWeight = 0.6;
 
     @Value("${rag.rerank.bm25-weight:0.4}")
-    private double bm25Weight;
+    private double bm25Weight = 0.4;
 
     private final ChatModel chatModel;
     private final StreamingChatModel streamingChatModel;
@@ -69,7 +98,11 @@ public class RagService {
     private final ConversationMemoryService conversationMemoryService;
     private final Bm25Scorer bm25Scorer;
     private final ConcurrentHashMap<String, InFlightGeneration> inFlightGenerations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicBoolean> summaryCompressionStates = new ConcurrentHashMap<>();
 
+    /**
+     * 创建 RAG 问答服务并注入其依赖组件。
+     */
     public RagService(
             ChatModel chatModel,
             StreamingChatModel streamingChatModel,
@@ -85,6 +118,9 @@ public class RagService {
         this.bm25Scorer = bm25Scorer;
     }
 
+    /**
+     * 使用同步方式完成一次 RAG 问答。
+     */
     public RagResponse ask(RagRequest request) {
         log.info("处理 RAG 问题: {}", request.question());
 
@@ -94,9 +130,10 @@ public class RagService {
                 cancelGenerationInternal(conversationId, "同步请求到达，取消已有流式生成");
             }
 
-            List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
-                .getRecentMessages(conversationId);
-            String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            ConversationMemoryService.ConversationMemorySnapshot memory = conversationMemoryService
+                .getMemorySnapshot(conversationId);
+            String rewrittenQuestion = rewriteQuestion(request.question(), memory);
+            updateIntentFromQuestion(conversationId, memory, request.question(), rewrittenQuestion);
             int requestedMaxResults = resolveRequestedMaxResults(request);
 
             long questionEmbeddingStart = System.nanoTime();
@@ -113,11 +150,13 @@ public class RagService {
 
             EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
             List<EmbeddingMatch<TextSegment>> vectorMatches = searchResult.matches();
+            updateFactsFromTopMatch(conversationId, vectorMatches);
 
             log.info("向量检索召回 {} 条候选片段，最小分数阈值: {}", vectorMatches.size(), minScore);
 
             if (vectorMatches.isEmpty()) {
                 conversationMemoryService.appendUserMessage(conversationId, request.question());
+                triggerAsyncSummaryCompression(conversationId);
                 conversationMemoryService.appendAssistantMessage(conversationId, EMPTY_MATCH_ANSWER);
                 return new RagResponse(
                     EMPTY_MATCH_ANSWER,
@@ -134,12 +173,13 @@ public class RagService {
                 .map(match -> match.segment().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
 
-            String prompt = buildPrompt(history, context, request.question());
+            String prompt = buildPrompt(memory, context, request.question());
             long answerStart = System.nanoTime();
             String answer = chatModel.chat(prompt);
             log.info("AI 基于知识库生成答案耗时: {} ms", elapsedMillis(answerStart));
 
             conversationMemoryService.appendUserMessage(conversationId, request.question());
+            triggerAsyncSummaryCompression(conversationId);
             conversationMemoryService.appendAssistantMessage(conversationId, answer);
 
             return new RagResponse(answer, conversationId, toSourceReferences(matches));
@@ -149,6 +189,9 @@ public class RagService {
         }
     }
 
+    /**
+     * 使用流式方式处理一次 RAG 问答请求。
+     */
     public SseEmitter askStream(RagRequest request) {
         if (request.question() == null || request.question().trim().isEmpty()) {
             throw new IllegalArgumentException("问题不能为空");
@@ -191,6 +234,9 @@ public class RagService {
         return emitter;
     }
 
+    /**
+     * 在后台线程中执行流式问答主流程。
+     */
     private void processStreamRequest(RagRequest request, InFlightGeneration generation) {
         String conversationId = generation.conversationId();
 
@@ -199,9 +245,10 @@ public class RagService {
                 return;
             }
 
-            List<ConversationMemoryService.ConversationMessage> history = conversationMemoryService
-                .getRecentMessages(conversationId);
-            String rewrittenQuestion = rewriteQuestion(request.question(), history);
+            ConversationMemoryService.ConversationMemorySnapshot memory = conversationMemoryService
+                .getMemorySnapshot(conversationId);
+            String rewrittenQuestion = rewriteQuestion(request.question(), memory);
+            updateIntentFromQuestion(conversationId, memory, request.question(), rewrittenQuestion);
             if (shouldAbort(generation)) {
                 return;
             }
@@ -225,6 +272,7 @@ public class RagService {
 
             EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
             List<EmbeddingMatch<TextSegment>> vectorMatches = searchResult.matches();
+            updateFactsFromTopMatch(conversationId, vectorMatches);
             log.info("流式向量检索召回: conversationId={}, matches={}, minScore={}",
                 conversationId, vectorMatches.size(), minScore);
 
@@ -241,6 +289,7 @@ public class RagService {
             if (matches.isEmpty()) {
                 sendEvent(generation, "delta", EMPTY_MATCH_ANSWER);
                 conversationMemoryService.appendUserMessage(conversationId, request.question());
+                triggerAsyncSummaryCompression(conversationId);
                 conversationMemoryService.appendAssistantMessage(conversationId, EMPTY_MATCH_ANSWER);
                 sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", false));
                 completeGeneration(generation);
@@ -250,7 +299,7 @@ public class RagService {
             String context = matches.stream()
                 .map(match -> match.segment().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
-            String prompt = buildPrompt(history, context, request.question());
+            String prompt = buildPrompt(memory, context, request.question());
             streamingChatModel.chat(prompt, new RagStreamingResponseHandler(generation, conversationId));
         } catch (Exception e) {
             if (generation.isCancelled() || generation.isCompleted()) {
@@ -263,6 +312,9 @@ public class RagService {
         }
     }
 
+    /**
+     * 取消指定会话当前正在进行的生成任务。
+     */
     public boolean cancelGeneration(String conversationId) {
         String normalizedConversationId = normalizeConversationId(conversationId);
         if (!StringUtils.hasText(normalizedConversationId)) {
@@ -355,9 +407,13 @@ public class RagService {
         return Math.min(request.maxResults(), configuredMaxResults);
     }
 
+    /**
+     * 解析参与 BM25 重排的候选片段数量，允许首次召回放大候选范围，最终结果仍受文段上限限制。
+     */
     private int resolveCandidateMaxResults(int requestedMaxResults) {
+        int safeRequestedMaxResults = Math.max(1, requestedMaxResults);
         int candidateMultiplier = Math.max(1, rerankCandidateMultiplier);
-        return Math.max(requestedMaxResults, requestedMaxResults * candidateMultiplier);
+        return Math.max(safeRequestedMaxResults, safeRequestedMaxResults * candidateMultiplier);
     }
 
     private List<HybridMatch> rerankMatches(
@@ -428,41 +484,166 @@ public class RagService {
             .collect(Collectors.toList());
     }
 
-    private String rewriteQuestion(String question, List<ConversationMemoryService.ConversationMessage> history) {
-        if (history.isEmpty()) {
+    /**
+     * 按需补全上下文依赖问题，避免默认使用模型重写检索词。
+     */
+    private String rewriteQuestion(String question, ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (!StringUtils.hasText(question)) {
             return question;
         }
+        String trimmedQuestion = question.trim();
+        if (!shouldRewriteQuestion(trimmedQuestion, memory)) {
+            return trimmedQuestion;
+        }
 
-        String historyText = formatHistory(history);
-        String rewritePrompt = String.format("""
-            你需要结合历史对话，把用户当前问题改写成一个完整、独立、可用于知识库检索的问题。
-            如果当前问题本身已经完整，直接原样返回，不要增加解释。
-            只输出改写后的问题，不要输出其它内容。
+        String anchor = resolveRewriteAnchor(memory);
+        if (!StringUtils.hasText(anchor)) {
+            return trimmedQuestion;
+        }
 
-            历史对话：
-            %s
-
-            当前问题：
-            %s
-            """, historyText, question);
-
-        String rewritten = chatModel.chat(rewritePrompt);
-        return rewritten != null && !rewritten.isBlank() ? rewritten.trim() : question;
+        String normalizedAnchor = anchor.trim();
+        if (trimmedQuestion.contains(normalizedAnchor)) {
+            return trimmedQuestion;
+        }
+        return normalizedAnchor + "：" + trimmedQuestion;
     }
 
+    /**
+     * 判断当前问题是否需要结合细化规则做增强。
+     */
+    private boolean shouldRewriteQuestion(String question, ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (memory == null || !hasAnyMemoryAnchor(memory)) {
+            return false;
+        }
+        if (!StringUtils.hasText(question)) {
+            return false;
+        }
+
+        String trimmedQuestion = question.trim();
+        if (isFollowUpQuestion(trimmedQuestion)) {
+            return true;
+        }
+        if (isContextReferenceQuestion(trimmedQuestion)) {
+            return true;
+        }
+        return shouldEnhanceGeneralQuestion(trimmedQuestion, memory);
+    }
+
+    /**
+     * 判断问题是否属于延续性追问。
+     */
+    private boolean isFollowUpQuestion(String question) {
+        if (FOLLOW_UP_ACTION_PATTERN.matcher(question).find()) {
+            return true;
+        }
+        return question.length() <= 10 && QUESTION_WORD_PATTERN.matcher(question).find();
+    }
+
+    /**
+     * 判断问题是否包含明显的上下文指代。
+     */
+    private boolean isContextReferenceQuestion(String question) {
+        if (CONTEXT_REFERENCE_PATTERN.matcher(question).find()) {
+            return true;
+        }
+        return question.length() <= 6;
+    }
+
+    /**
+     * 判断普通问题是否需要结合记忆做增强。
+     */
+    private boolean shouldEnhanceGeneralQuestion(String question, ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (!QUESTION_WORD_PATTERN.matcher(question).find()) {
+            return false;
+        }
+        if (StringUtils.hasText(memory.intent()) && !question.contains(memory.intent().trim())) {
+            return true;
+        }
+        if (memory.facts() != null) {
+            for (String fact : memory.facts()) {
+                if (StringUtils.hasText(fact) && containsOverlapKeyword(question, fact)) {
+                    return true;
+                }
+            }
+        }
+        return question.length() <= 14;
+    }
+
+    /**
+     * 判断问题与事实锚点是否存在关键词重叠。
+     */
+    private boolean containsOverlapKeyword(String question, String anchor) {
+        String normalizedQuestion = question.replace("：", " ").replace("，", " ").replace("。", " ").trim();
+        String normalizedAnchor = anchor.replace("：", " ").replace("，", " ").replace("。", " ").trim();
+        if (!StringUtils.hasText(normalizedQuestion) || !StringUtils.hasText(normalizedAnchor)) {
+            return false;
+        }
+        for (String token : normalizedAnchor.split("\\s+")) {
+            if (token.length() >= 2 && normalizedQuestion.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断会话记忆中是否存在可用于补全的锚点信息。
+     */
+    private boolean hasAnyMemoryAnchor(ConversationMemoryService.ConversationMemorySnapshot memory) {
+        return StringUtils.hasText(memory.intent())
+                || (memory.facts() != null && !memory.facts().isEmpty())
+                || (memory.recentMessages() != null && !memory.recentMessages().isEmpty())
+                || StringUtils.hasText(memory.summary());
+    }
+
+    /**
+     * 选择最适合补全问题的上下文锚点。
+     */
+    private String resolveRewriteAnchor(ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (memory == null) {
+            return null;
+        }
+        if (StringUtils.hasText(memory.intent())) {
+            return memory.intent().trim();
+        }
+        if (memory.facts() != null) {
+            for (String fact : memory.facts()) {
+                if (StringUtils.hasText(fact)) {
+                    return trimToMaxLength(fact.trim(), memoryTopMatchMaxLength);
+                }
+            }
+        }
+        if (memory.recentMessages() != null) {
+            for (int i = memory.recentMessages().size() - 1; i >= 0; i--) {
+                ConversationMemoryService.ConversationMessage message = memory.recentMessages().get(i);
+                if (message.role() == ConversationMemoryService.ConversationRole.USER && StringUtils.hasText(message.content())) {
+                    return trimToMaxLength(message.content().trim(), memoryIntentMaxSourceLength);
+                }
+            }
+        }
+        if (StringUtils.hasText(memory.summary())) {
+            return trimToMaxLength(memory.summary().trim(), memoryIntentMaxSourceLength);
+        }
+        return null;
+    }
+
+    /**
+     * 构建最终回答阶段使用的 Prompt。
+     */
     private String buildPrompt(
-            List<ConversationMemoryService.ConversationMessage> history,
+            ConversationMemoryService.ConversationMemorySnapshot memory,
             String context,
             String question) {
-        String historyText = history.isEmpty() ? "无" : formatHistory(history);
+        String memoryContext = buildMemoryContext(memory);
+        String safeMemoryContext = StringUtils.hasText(memoryContext) ? memoryContext : "无";
 
         return String.format("""
             你是一个基于文档内容回答问题的助手。
-            你必须严格依据下面提供的历史对话和文档上下文回答。
+            你必须严格依据下面提供的会话记忆和文档上下文回答。
             如果上下文中没有答案，请明确说明“根据已上传文档无法回答该问题”。
             不要编造，不要补充上下文之外的事实。
 
-            历史对话：
+            会话记忆：
             %s
 
             文档上下文：
@@ -470,9 +651,251 @@ public class RagService {
 
             用户当前问题：%s
 
-            请直接给出中文答案：""", historyText, context, question);
+            请直接给出中文答案：""", safeMemoryContext, context, question);
     }
 
+    /**
+     * 根据原始问题与改写问题更新会话意图。
+     */
+    private void updateIntentFromQuestion(
+            String conversationId,
+            ConversationMemoryService.ConversationMemorySnapshot memory,
+            String question,
+            String rewrittenQuestion) {
+        if (!StringUtils.hasText(conversationId) || !StringUtils.hasText(question) || !StringUtils.hasText(rewrittenQuestion)) {
+            return;
+        }
+        String extractedIntent = extractIntentFromQuestion(memory, question, rewrittenQuestion);
+        String normalizedIntent = normalizeExtractedIntent(extractedIntent);
+        if (normalizedIntent != null) {
+            conversationMemoryService.updateIntent(conversationId, normalizedIntent);
+        }
+    }
+
+    /**
+     * 提取当前问题对应的阶段性意图描述。
+     */
+    private String extractIntentFromQuestion(
+            ConversationMemoryService.ConversationMemorySnapshot memory,
+            String question,
+            String rewrittenQuestion) {
+        String prompt = buildIntentExtractionPrompt(memory, question, rewrittenQuestion);
+        String response = chatModel.chat(prompt);
+        return response == null ? null : response.trim();
+    }
+
+    /**
+     * 构建意图提取使用的 Prompt。
+     */
+    private String buildIntentExtractionPrompt(
+            ConversationMemoryService.ConversationMemorySnapshot memory,
+            String question,
+            String rewrittenQuestion) {
+        String memoryContext = buildMemoryContext(memory);
+        String safeMemoryContext = StringUtils.hasText(memoryContext)
+            ? trimToMaxLength(memoryContext, memoryIntentMaxSourceLength)
+            : "无";
+        return String.format("""
+            你需要根据会话记忆、用户原问题和改写后的问题，总结当前轮次最核心的会话意图。
+            只输出一句简短中文短语，不要解释，不要分点，不要加前缀。
+
+            会话记忆：
+            %s
+
+            原问题：
+            %s
+
+            改写问题：
+            %s
+            """, safeMemoryContext, question, rewrittenQuestion);
+    }
+
+    /**
+     * 清洗意图提取结果，过滤无效占位文本。
+     */
+    private String normalizeExtractedIntent(String intent) {
+        if (!StringUtils.hasText(intent)) {
+            return null;
+        }
+        String normalized = intent.trim()
+            .replace("当前意图：", "")
+            .replace("意图：", "")
+            .trim();
+        if (!StringUtils.hasText(normalized)) {
+            return null;
+        }
+        if (List.of("无", "未知", "未提及", "无法判断").contains(normalized)) {
+            return null;
+        }
+        return normalized;
+    }
+
+    /**
+     * 根据最高相关检索片段更新会话事实。
+     */
+    private void updateFactsFromTopMatch(
+            String conversationId,
+            List<EmbeddingMatch<TextSegment>> matches) {
+        if (!StringUtils.hasText(conversationId) || matches == null || matches.isEmpty()) {
+            return;
+        }
+        EmbeddingMatch<TextSegment> topMatch = matches.stream()
+            .filter(match -> match != null && match.embedded() != null && match.score() != null)
+            .max(Comparator.comparingDouble(EmbeddingMatch::score))
+            .orElse(null);
+        if (topMatch == null || topMatch.score() < memoryFactScoreThreshold) {
+            return;
+        }
+        List<String> normalizedFacts = normalizeExtractedFacts(extractFactsFromMatch(topMatch));
+        if (!normalizedFacts.isEmpty()) {
+            conversationMemoryService.updateFacts(conversationId, normalizedFacts);
+        }
+    }
+
+    /**
+     * 从最高相关片段中直接提取原文事实列表。
+     */
+    private List<String> extractFactsFromMatch(EmbeddingMatch<TextSegment> topMatch) {
+        TextSegment segment = topMatch.embedded();
+        if (segment == null || !StringUtils.hasText(segment.text())) {
+            return List.of();
+        }
+        String content = trimToMaxLength(segment.text(), memoryTopMatchMaxLength);
+        return content.lines().map(String::trim).filter(StringUtils::hasText).toList();
+    }
+
+    /**
+     * 清洗事实提取结果，过滤无效或占位内容。
+     */
+    private List<String> normalizeExtractedFacts(List<String> facts) {
+        if (facts == null || facts.isEmpty()) {
+            return List.of();
+        }
+        List<String> invalidMarkers = List.of("无", "未知", "未提及", "无法判断");
+        List<String> normalized = new ArrayList<>();
+        for (String fact : facts) {
+            if (!StringUtils.hasText(fact)) {
+                continue;
+            }
+            String value = fact.trim()
+                .replaceFirst("^[\\-•*\\d.、\s]+", "")
+                .trim();
+            if (!StringUtils.hasText(value) || invalidMarkers.contains(value)) {
+                continue;
+            }
+            normalized.add(value);
+            if (normalized.size() >= Math.max(memoryMaxFactsPerUpdate, 1)) {
+                break;
+            }
+        }
+        return normalized;
+    }
+
+    /**
+     * 异步触发指定会话的历史摘要压缩任务。
+     */
+    private void triggerAsyncSummaryCompression(String conversationId) {
+        if (!memorySummaryEnabled || !StringUtils.hasText(conversationId)) {
+            return;
+        }
+        if (!conversationMemoryService.shouldCompressSummary(conversationId)) {
+            return;
+        }
+        AtomicBoolean state = summaryCompressionStates.computeIfAbsent(conversationId, ignored -> new AtomicBoolean(false));
+        if (!state.compareAndSet(false, true)) {
+            return;
+        }
+        CompletableFuture.runAsync(() -> compressSummaryAsync(conversationId, state));
+    }
+
+    /**
+     * 在后台线程中压缩指定会话的历史摘要。
+     */
+    private void compressSummaryAsync(String conversationId, AtomicBoolean state) {
+        try {
+            String source = conversationMemoryService.getSummarySource(conversationId);
+            if (!StringUtils.hasText(source)) {
+                return;
+            }
+            String summary = memorySummaryModelEnabled
+                ? summarizeHistory(source)
+                : trimToMaxLength(source, memorySummarySourceMaxLength);
+            if (StringUtils.hasText(summary)) {
+                conversationMemoryService.updateSummary(conversationId, summary);
+            }
+        } catch (Exception e) {
+            log.warn("异步压缩历史摘要失败: conversationId={}, message={}", conversationId, e.getMessage());
+        } finally {
+            state.set(false);
+        }
+    }
+
+    /**
+     * 调用模型压缩历史摘要文本。
+     */
+    private String summarizeHistory(String source) {
+        String prompt = buildSummaryCompressionPrompt(source);
+        String response = chatModel.chat(prompt);
+        return response == null ? null : response.trim();
+    }
+
+    /**
+     * 构建历史摘要压缩使用的 Prompt。
+     */
+    private String buildSummaryCompressionPrompt(String source) {
+        return String.format("""
+            你需要将以下会话历史压缩为一段简洁、稳定、可复用的中文历史摘要。
+            保留关键信息、主要结论、长期有效约束，去掉重复与冗余表述。
+            只输出摘要正文，不要加标题，不要解释。
+
+            会话历史：
+            %s
+            """, trimToMaxLength(source, memorySummarySourceMaxLength));
+    }
+
+    /**
+     * 按最大长度截断文本，优先保留尾部最新内容。
+     */
+    private String trimToMaxLength(String value, int maxLength) {
+        if (!StringUtils.hasText(value)) {
+            return value;
+        }
+        int safeMaxLength = Math.max(maxLength, 1);
+        if (value.length() <= safeMaxLength) {
+            return value;
+        }
+        return value.substring(value.length() - safeMaxLength);
+    }
+
+    /**
+     * 将结构化记忆整理为可注入 Prompt 的标准文本块。
+     */
+    private String buildMemoryContext(ConversationMemoryService.ConversationMemorySnapshot memory) {
+        if (memory == null) {
+            return "";
+        }
+
+        List<String> sections = new ArrayList<>();
+        if (StringUtils.hasText(memory.intent())) {
+            sections.add("当前意图：\n" + memory.intent());
+        }
+        if (memory.facts() != null && !memory.facts().isEmpty()) {
+            sections.add("已确认事实：\n" + memory.facts().stream()
+                .map(fact -> "- " + fact)
+                .collect(Collectors.joining("\n")));
+        }
+        if (StringUtils.hasText(memory.summary())) {
+            sections.add("历史摘要：\n" + memory.summary());
+        }
+        if (memory.recentMessages() != null && !memory.recentMessages().isEmpty()) {
+            sections.add("最近对话：\n" + formatHistory(memory.recentMessages()));
+        }
+        return String.join("\n\n", sections);
+    }
+
+    /**
+     * 将最近对话格式化为可读的角色文本。
+     */
     private String formatHistory(List<ConversationMemoryService.ConversationMessage> history) {
         return history.stream()
             .map(message -> (message.role() == ConversationMemoryService.ConversationRole.USER ? "用户：" : "助手：")
@@ -480,6 +903,9 @@ public class RagService {
             .collect(Collectors.joining("\n"));
     }
 
+    /**
+     * 将检索命中结果转换为接口返回使用的来源引用列表。
+     */
     private List<SourceReference> toSourceReferences(List<HybridMatch> matches) {
         return matches.stream()
             .map(match -> {
@@ -553,6 +979,7 @@ public class RagService {
             if (!generation.isCancelled()) {
                 if (StringUtils.hasText(finalAnswer)) {
                     conversationMemoryService.appendUserMessage(conversationId, generation.question());
+                    triggerAsyncSummaryCompression(conversationId);
                     conversationMemoryService.appendAssistantMessage(conversationId, finalAnswer);
                 }
                 sendEvent(generation, "complete", Map.of("conversationId", conversationId, "cancelled", false));

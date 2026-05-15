@@ -32,7 +32,8 @@
 
 ### 核心功能
 
-- 📄 **文档上传** - 支持 PDF/TXT，智能分块
+- 📄 **文档上传** - 支持 PDF/TXT/MD/DOC/DOCX，智能分块
+- 📊 **批量上传** - 最多 50 个文件，需 ADMIN 权限
 - 🧠 **智能问答** - RAG检索增强，流式响应
 - 🤖 **智能体对话** - LangChain4j Agentic架构，工具自主调用
 - 📚 **领域文档管理** - 10+领域，异步处理
@@ -89,9 +90,10 @@
 
 - Java 21+
 - Maven 3.9+
-- Ollama
+- Ollama（使用 `llm.provider=ollama` 时需要）
 - Qdrant
-- 阿里云DashScope API Key（可选，用于混合模型）
+- OpenAI API Key（使用 `llm.provider=openai` 时需要）
+- vLLM 服务与 API Key（使用 `llm.provider=vllm` 时按实际部署决定）
 
 ### 安装运行
 
@@ -133,20 +135,28 @@ open http://localhost:8080
 
 ### 文档管理
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `POST` | `/api/documents/upload` | 上传并处理 PDF/TXT 文档 |
-| `GET` | `/api/documents` | 查询已上传文档列表 |
-| `DELETE` | `/api/documents/{documentId}` | 删除指定文档 |
-| `GET` | `/api/documents/health` | 文档服务健康检查 |
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| `POST` | `/api/documents/upload` | 上传并处理 PDF/TXT/MD/DOC/DOCX 文档 | ADMIN |
+| `POST` | `/api/documents/batch-upload` | 批量上传（最多50个文件） | ADMIN |
+| `GET` | `/api/documents/batch-upload/{taskId}` | 查询批量任务状态 | 创建者/ADMIN |
+| `DELETE` | `/api/documents/{documentId}` | 删除指定文档 | ADMIN |
+| `GET` | `/api/documents/health` | 文档服务健康检查 | 公开 |
 
 ```bash
+# 单文件上传
 curl -X POST http://localhost:8080/api/documents/upload \
-  -F "file=@document.txt"
+  -F "file=@document.pdf" \
+  -H "Authorization: Bearer <admin-token>"
 
-curl http://localhost:8080/api/documents
+# 批量上传
+curl -X POST http://localhost:8080/api/documents/batch-upload \
+  -F "files=@file1.pdf" -F "files=@file2.docx" \
+  -H "Authorization: Bearer <admin-token>"
 
-curl -X DELETE http://localhost:8080/api/documents/{documentId}
+# 查询任务状态
+curl http://localhost:8080/api/documents/batch-upload/<taskId> \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### RAG 问答
@@ -194,18 +204,38 @@ curl -N -X POST http://localhost:8080/api/rag/ask/stream \
 ### application.yaml 关键配置
 
 ```yaml
-# Ollama 配置
-ollama:
-  base-url: http://localhost:11434
-  chat-model: qwen2.5:7b
-  embedding-model: qwen3-embedding:0.6b
+llm:
+  provider: ${LLM_PROVIDER:ollama}
+  timeout: ${LLM_TIMEOUT:120s}
+  chat-model: ${LLM_CHAT_MODEL:}
+  embedding-model: ${LLM_EMBEDDING_MODEL:}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+    embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh-v1.5}
+    think: ${OLLAMA_THINK:false}
+  vllm:
+    base-url: ${VLLM_BASE_URL:http://localhost:8000/v1}
+    chat-model: ${VLLM_CHAT_MODEL:Qwen/Qwen2.5-7B-Instruct}
+    embedding-model: ${VLLM_EMBEDDING_MODEL:BAAI/bge-base-zh-v1.5}
+    api-key: ${VLLM_API_KEY:}
+  openai:
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+    embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    api-key: ${OPENAI_API_KEY:}
+```
+
+- `llm.provider` 支持 `ollama`、`vllm`、`openai`
+- `llm.chat-model` 与 `llm.embedding-model` 为全局覆盖项，配置后会优先于 provider 专属模型名生效
+- `openai` 与 `vllm` 都走 OpenAI 兼容客户端，但配置语义不同：`openai` 用于官方或显式 OpenAI 接口，`vllm` 用于自建兼容服务
 
 # Qdrant 配置
 qdrant:
   host: localhost
   port: 6334
   collection-name: knowledge-base
-  vector-size: 1024
+  vector-size: 2056
   create-collection-if-not-exists: true
 
 # RAG 配置

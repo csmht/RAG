@@ -16,7 +16,111 @@
 
 ## 🗄️ 表结构
 
-### 1. users 表
+### 1. batch_tasks 表
+
+批量上传任务表，存储批量上传任务信息。
+
+```sql
+CREATE TABLE batch_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id VARCHAR(36) NOT NULL UNIQUE,
+    user_id VARCHAR(100) NOT NULL,
+    knowledge_base VARCHAR(255) DEFAULT 'default',
+    category VARCHAR(255),
+    tags VARCHAR(1000),
+    total_files INTEGER NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'CREATED',
+    progress_percentage INTEGER DEFAULT 0,
+    success_count INTEGER DEFAULT 0,
+    failure_count INTEGER DEFAULT 0,
+    message VARCHAR(500),
+    error_message TEXT,
+    created_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_time DATETIME
+);
+
+CREATE INDEX idx_batch_tasks_task_id ON batch_tasks(task_id);
+CREATE INDEX idx_batch_tasks_user_id ON batch_tasks(user_id);
+CREATE INDEX idx_batch_tasks_status ON batch_tasks(status);
+```
+
+**字段说明**：
+- `task_id` - 任务唯一标识（UUID）
+- `user_id` - 创建者用户ID
+- `knowledge_base` - 知识库标识
+- `category` - 文档分类
+- `tags` - 标签（逗号分隔）
+- `total_files` - 文件总数
+- `status` - 任务状态（CREATED/PROCESSING/COMPLETED/FAILED）
+- `progress_percentage` - 处理进度（0-100）
+- `success_count/failure_count` - 成功/失败计数
+
+---
+
+### 2. batch_file_results 表
+
+批量文件处理结果表，存储每个文件的处理结果。
+
+```sql
+CREATE TABLE batch_file_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id VARCHAR(36) NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    success BOOLEAN NOT NULL DEFAULT FALSE,
+    error_message VARCHAR(1000),
+    embedding_count INTEGER,
+    processed_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES batch_tasks(task_id)
+);
+
+CREATE INDEX idx_batch_file_results_task_id ON batch_file_results(task_id);
+```
+
+**字段说明**：
+- `task_id` - 关联的任务ID
+- `file_name` - 文件名
+- `success` - 是否成功
+- `error_message` - 错误信息
+- `embedding_count` - 向量化片段数
+
+---
+
+### 3. uploaded_files 表
+
+上传文件记录表，存储所有上传文件的信息。
+
+```sql
+CREATE TABLE uploaded_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id VARCHAR(100) NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    original_filename VARCHAR(255) NOT NULL,
+    file_type VARCHAR(50) NOT NULL,
+    file_path VARCHAR(500) NOT NULL,
+    file_size INTEGER,
+    content_type VARCHAR(100),
+    embedding_count INTEGER,
+    processed_text TEXT,
+    processed_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(50) NOT NULL DEFAULT 'COMPLETED',
+    file_hash VARCHAR(64),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX idx_uploaded_files_user_id ON uploaded_files(user_id);
+CREATE INDEX idx_uploaded_files_file_hash ON uploaded_files(file_hash);
+CREATE INDEX idx_uploaded_files_status ON uploaded_files(status);
+```
+
+**字段说明**：
+- `file_type` - 文件类型（PDF/TEXT/DOCUMENT/FILE）
+- `status` - 处理状态（COMPLETED/STORE_ONLY）
+- `file_hash` - SHA-256 哈希（用于去重）
+- `processed_text` - 提取的文本内容
+
+---
+
+### 4. users 表
 
 用户表，存储系统用户信息。
 
@@ -44,7 +148,7 @@ VALUES ('mark', '$2a$10$2B2tppkLZ4.dvCegcZ4l0.vDUU.atdOUryF//K2nZw1qTCXj8KHJK');
 
 ---
 
-### 2. chat_messages 表
+### 5. chat_messages 表
 
 聊天消息表，存储用户和 AI 的对话记录。
 
@@ -81,7 +185,7 @@ CREATE INDEX idx_chat_messages_created_at ON chat_messages(created_at);
 
 ---
 
-### 3. domain_documents 表
+### 6. domain_documents 表
 
 领域文档表，存储上传的领域知识文档。
 
@@ -257,6 +361,7 @@ ORDER BY created_at ASC;
    - 单个数据库文件大小限制：~281 TB（理论值）
    - 单个 TEXT 字段最大：1 GB
    - 并发写入支持有限（建议单应用实例）
+   - 多实例部署时，批量任务结果存储在单一数据库文件，非内存缓存
 
 2. **密码加密**
    - 使用 BCrypt 加密算法

@@ -99,7 +99,7 @@ qdrant:
   host: localhost
   port: 6334
   collection-name: knowledge-base
-  vector-size: 1024
+  vector-size: 2056
 ```
 
 ### 启用阿里云模型（可选）
