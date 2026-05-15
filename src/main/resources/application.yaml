@@ -1,97 +1,161 @@
 spring:
   application:
+    # Spring 应用名称，用于日志、监控与服务标识。
     name: knowledge
   servlet:
     multipart:
       enabled: true
+      # 单个上传文件的最大大小限制。
       max-file-size: ${SPRING_MULTIPART_MAX_FILE_SIZE:50MB}
+      # 单次请求允许上传的总大小限制。
       max-request-size: ${SPRING_MULTIPART_MAX_REQUEST_SIZE:2500MB}
 
-server:
-  tomcat:
-    max-part-header-size: ${SERVER_TOMCAT_MAX_PART_HEADER_SIZE:16KB}
-      max-file-size: ${SPRING_MULTIPART_MAX_FILE_SIZE:50MB}
-      max-request-size: ${SPRING_MULTIPART_MAX_REQUEST_SIZE:2500MB}
-
-  # SQLite数据库配置
+  # SQLite 数据库配置。
   datasource:
+    # SQLite 数据库连接地址。
     url: jdbc:sqlite:knowledge.db
-
+    # SQLite JDBC 驱动类名。
     driver-class-name: org.sqlite.JDBC
 
   jpa:
     hibernate:
+      # Hibernate 使用的 SQLite 方言。
       database-platform: org.hibernate.community.dialect.SQLiteDialect
+      # 启动时自动更新表结构。
       ddl-auto: update
+    # 是否打印 JPA 生成的 SQL。
     show-sql: false
 
 llm:
+  # 当前启用的大模型提供方，可选 ollama、vllm、openai 等。
   provider: ${LLM_PROVIDER:ollama}
+  # 模型调用的统一超时时间。
   timeout: ${LLM_TIMEOUT:120s}
+  # 统一覆盖聊天模型名称，留空时走具体提供方配置。
   chat-model: ${LLM_CHAT_MODEL:}
+  # 统一覆盖向量模型名称，留空时走具体提供方配置。
   embedding-model: ${LLM_EMBEDDING_MODEL:}
   ollama:
+    # Ollama 服务地址。
     base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    # Ollama 使用的聊天模型名称。
     chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+    # Ollama 使用的向量模型名称。
     embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh-v1.5}
+    # 是否开启支持思考输出的模型模式。
     think: ${OLLAMA_THINK:false}
   vllm:
+    # vLLM 服务的 OpenAI 兼容接口地址。
     base-url: ${VLLM_BASE_URL:http://localhost:8000/v1}
+    # vLLM 使用的聊天模型名称。
     chat-model: ${VLLM_CHAT_MODEL:Qwen/Qwen2.5-7B-Instruct}
+    # vLLM 使用的向量模型名称。
     embedding-model: ${VLLM_EMBEDDING_MODEL:BAAI/bge-base-zh-v1.5}
+    # vLLM 接口访问密钥。
     api-key: ${VLLM_API_KEY:}
   openai:
+    # OpenAI 或兼容服务的接口地址。
     base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    # OpenAI 使用的聊天模型名称。
     chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+    # OpenAI 使用的向量模型名称。
     embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    # OpenAI 接口访问密钥。
     api-key: ${OPENAI_API_KEY:}
 
 qdrant:
+  # Qdrant 服务主机地址。
   host: ${QDRANT_HOST:localhost}
+  # Qdrant gRPC 端口。
   port: ${QDRANT_PORT:6334}
+  # Qdrant HTTP 端口。
   http-port: ${QDRANT_HTTP_PORT:6333}
+  # 向量集合名称。
   collection-name: ${QDRANT_COLLECTION_NAME:knowledge-base}
+  # 向量维度，需与向量模型输出一致。
   vector-size: ${QDRANT_VECTOR_SIZE:768}
+  # 集合不存在时是否自动创建。
   create-collection-if-not-exists: ${QDRANT_CREATE_COLLECTION_IF_NOT_EXISTS:true}
 
 rag:
+  # 分块目标大小，用于控制单个文本块的期望长度。
   chunk-size: ${RAG_CHUNK_SIZE:320}
+  # 分块最小大小，小于该值的块会尽量被合并。
   chunk-min-size: ${RAG_CHUNK_MIN_SIZE:250}
+  # 分块最大大小，超过该值的文本会继续切分。
   chunk-max-size: ${RAG_CHUNK_MAX_SIZE:350}
+  # 长文本切片时的重叠字符数，用于减少语义断裂。
   chunk-overlap: ${RAG_CHUNK_OVERLAP:40}
-  min-text-length: ${RAG_MIN_TEXT_LENGTH:80}
+  # 有效文本块的最小长度，低于该值的块会被过滤。
+  min-text-length: ${RAG_MIN_TEXT_LENGTH:20}
+  # 每个分块最终保留的关键词数量。
   keyword-count: ${RAG_KEYWORD_COUNT:6}
+  # 关键词最小词长，小于该长度的词项会被过滤。
+  keyword-min-token-length: ${RAG_KEYWORD_MIN_TOKEN_LENGTH:2}
+  # 分块关键词在当前块中的最小出现次数阈值。
+  keyword-min-occurrences: ${RAG_KEYWORD_MIN_OCCURRENCES:2}
+  # 分块词频占全文词频的最小比例阈值，用于判断是否属于该块。
+  keyword-chunk-ratio-threshold: ${RAG_KEYWORD_CHUNK_RATIO_THRESHOLD:0.6}
+  # 候选关键词扩展倍数，用于在截断前保留更多候选词参与排序。
+  keyword-max-candidate-multiplier: ${RAG_KEYWORD_MAX_CANDIDATE_MULTIPLIER:4}
+  # IKAnalyzer 是否启用智能分词模式。
+  keyword-use-smart-ik: ${RAG_KEYWORD_USE_SMART_IK:true}
+  # 检索阶段最多返回的候选片段数量。
   max-results: ${RAG_MAX_RESULTS:5}
+  # 向量检索的最低相似度分数阈值。
   min-score: ${RAG_MIN_SCORE:0.5}
+  # 会话记忆保留的最近消息窗口大小。
   memory-window: ${RAG_MEMORY_WINDOW:6}
+  # 会话缓存存活时间，超过后自动过期。
   session-ttl-seconds: ${RAG_SESSION_TTL_SECONDS:1800}
+  # 会话记忆清理任务的执行间隔。
   memory-cleanup-interval-ms: ${RAG_MEMORY_CLEANUP_INTERVAL_MS:300000}
+  # 会话摘要允许保留的最大字符数。
   summary-max-length: ${RAG_SUMMARY_MAX_LENGTH:2000}
+  # 会话事实记忆允许保留的最大条数。
   facts-max-count: ${RAG_FACTS_MAX_COUNT:8}
+  # 意图摘要允许保留的最大字符数。
   intent-max-length: ${RAG_INTENT_MAX_LENGTH:200}
+  # 摘要长度达到该比例时触发压缩。
   summary-compress-threshold-ratio: ${RAG_SUMMARY_COMPRESS_THRESHOLD_RATIO:1.0}
+  # 片段可沉淀为事实记忆的最低相关度阈值。
   memory-fact-score-threshold: ${RAG_MEMORY_FACT_SCORE_THRESHOLD:0.6}
+  # 单次从高相关片段中最多提取的事实条数。
   memory-max-facts-per-update: ${RAG_MEMORY_MAX_FACTS_PER_UPDATE:3}
+  # 用于沉淀事实的片段最大截取长度。
   memory-top-match-max-length: ${RAG_MEMORY_TOP_MATCH_MAX_LENGTH:300}
+  # 用于推断会话意图的源文本最大长度。
   memory-intent-max-source-length: ${RAG_MEMORY_INTENT_MAX_SOURCE_LENGTH:500}
+  # 用于生成会话摘要的源文本最大长度。
   memory-summary-source-max-length: ${RAG_MEMORY_SUMMARY_SOURCE_MAX_LENGTH:4000}
+  # 是否启用会话摘要能力。
   memory-summary-enabled: ${RAG_MEMORY_SUMMARY_ENABLED:true}
+  # 是否允许通过模型生成会话摘要。
   memory-summary-model-enabled: ${RAG_MEMORY_SUMMARY_MODEL_ENABLED:true}
+  # 流式回答的最大等待超时时间。
   stream-timeout-ms: ${RAG_STREAM_TIMEOUT_MS:300000}
 
 logging:
   level:
+    # 全局默认日志级别。
     root: ${LOG_LEVEL_ROOT:INFO}
+    # 项目业务代码日志级别。
     com.mark.knowledge: ${LOG_LEVEL_APP:DEBUG}
+    # LangChain4j 相关日志级别。
     dev.langchain4j: ${LOG_LEVEL_LANGCHAIN4J:DEBUG}
+    # Spring Security 日志级别。
     org.springframework.security: DEBUG
 
 app:
   jwt:
+    # JWT 签名密钥，生产环境应改为安全密钥并通过环境变量注入。
     secret: "mySecretKeyForJWTTokenGenerationWithEnoughLength1234567890"
+    # JWT 令牌有效期，单位为毫秒。
     expiration-ms: 86400000
   users:
     - username: admin
+      # 默认管理员密码，生产环境应立即修改。
       password: admin123
       roles:
+        # 默认管理员角色列表。
         - ROLE_ADMIN

@@ -121,6 +121,13 @@
 			<version>3.0.3</version>
 		</dependency>
 
+		<!-- IKAnalyzer for Chinese keyword tokenization -->
+		<dependency>
+			<groupId>com.github.magese</groupId>
+			<artifactId>ik-analyzer</artifactId>
+			<version>8.5.0</version>
+		</dependency>
+
 		<!-- Spring Boot Web Client for REST API calls -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
