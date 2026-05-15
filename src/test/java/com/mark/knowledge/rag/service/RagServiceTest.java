@@ -116,7 +116,6 @@ class RagServiceTest {
 
         when(chatModel.chat(any(String.class)))
             .thenReturn("定位上传限制")
-            .thenReturn("文件大小不能超过 50MB\n仅支持 pdf 文件")
             .thenReturn("请先检查文件大小与格式限制");
         when(embeddingModel.embed(any(String.class))).thenReturn(Response.from(embedding));
         when(embeddingStore.search(any(EmbeddingSearchRequest.class)))
@@ -128,7 +127,7 @@ class RagServiceTest {
         ConversationMemoryService memoryService = extractMemoryService();
         ConversationMemoryService.ConversationMemorySnapshot snapshot = memoryService.getMemorySnapshot("conv-1");
         assertEquals("定位上传限制", snapshot.intent());
-        assertEquals(List.of("文件大小不能超过 50MB", "仅支持 pdf 文件"), snapshot.facts());
+        assertEquals(List.of("系统要求上传文件大小不能超过 50MB，且仅支持 pdf 文件。"), snapshot.facts());
         assertEquals(2, snapshot.recentMessages().size());
     }
 
