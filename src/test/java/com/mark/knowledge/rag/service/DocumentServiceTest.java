@@ -29,6 +29,7 @@ class DocumentServiceTest {
         ReflectionTestUtils.setField(documentService, "chunkOverlap", 40);
         ReflectionTestUtils.setField(documentService, "minTextLength", 80);
         ReflectionTestUtils.setField(documentService, "keywordCount", 6);
+        ReflectionTestUtils.setField(documentService, "chunkTitleMaxLength", 24);
     }
 
     @Test
@@ -53,7 +54,7 @@ class DocumentServiceTest {
         assertFalse(segments.isEmpty());
 
         TextSegment firstSegment = segments.getFirst();
-        assertTrue(firstSegment.text().startsWith("【标题：AI 知识库建设指南】"));
+        assertTrue(firstSegment.text().startsWith("【标题：AI 知识库建设指南"));
         assertTrue(firstSegment.text().contains("关键词："));
         assertFalse(firstSegment.text().contains("第 1 页"));
         assertFalse(firstSegment.text().contains("�"));
@@ -134,5 +135,55 @@ class DocumentServiceTest {
         assertTrue(firstSegment.text().contains("向量数据库中的中文内容"));
         assertFalse(firstSegment.text().contains("锟"));
         assertFalse(firstSegment.text().contains("�"));
+    }
+
+    @Test
+    void shouldInheritSectionTitleFromMarkdownHeading() {
+        String text = """
+            知识库分块升级说明
+
+            ## 切块策略
+
+            为了让知识库检索更稳定，我们需要先识别文档中的标题层级，再让同一章节下的内容尽量聚合成块。这样做可以避免不同主题的内容被错误拼接，也能让片段标题更加准确。
+
+            - 优先识别 Markdown 标题
+            - 标题后的短正文尽量合并
+            - 列表项在长度允许时整体保留
+            """;
+
+        DocumentService.ProcessedDocument processedDocument = documentService.processDocument(
+            new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)),
+            "markdown-heading.txt"
+        );
+
+        TextSegment firstSegment = processedDocument.segments().getFirst();
+        assertTrue(firstSegment.text().startsWith("【标题：知识库分块升级说明 / 切块策略】"));
+        assertEquals("知识库分块升级说明 / 切块策略", firstSegment.metadata().getString("chunkTitle"));
+        assertTrue(firstSegment.text().contains("优先识别 Markdown 标题"));
+    }
+
+    @Test
+    void shouldKeepSectionChunksSeparatedAcrossDifferentHeadings() {
+        String text = """
+            知识库治理手册
+
+            一、背景说明
+
+            知识库项目需要先统一文档清洗和切块策略，避免来源杂乱导致检索命中不稳定。背景部分主要解释为什么要做结构化切块，以及这项能力如何影响召回质量。只有先把章节边界识别清楚，后续的检索召回、片段展示和答案生成才能保持稳定，不会把不同主题的内容混在一起。
+
+            二、实施步骤
+
+            实施阶段需要先识别章节标题，再合并标题后的短正文，最后补充关键词与元数据，确保每个片段都具备稳定语义边界和可追踪来源。同时还要控制每个片段的长度范围，让向量化输入足够完整，又不会因为信息过杂而削弱检索精度。
+            """;
+
+        DocumentService.ProcessedDocument processedDocument = documentService.processDocument(
+            new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)),
+            "section-heading.txt"
+        );
+
+        List<TextSegment> segments = processedDocument.segments();
+        assertEquals(2, segments.size());
+        assertTrue(segments.get(0).text().startsWith("【标题：知识库治理手册 / 背景说明】"));
+        assertTrue(segments.get(1).text().startsWith("【标题：知识库治理手册 / 实施步骤】"));
     }
 }
