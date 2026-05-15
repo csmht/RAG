@@ -39,7 +39,7 @@ class RagServiceTest {
             streamingChatModel,
             embeddingModel,
             embeddingStore,
-            new ConversationMemoryService(3, 1800),
+            new ConversationMemoryService(3, 1800, 2000, 8, 200),
             new Bm25Scorer()
         );
     }

@@ -19,18 +19,26 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ConversationMemoryService {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationMemoryService.class);
-    private static final int DEFAULT_FACT_LIMIT = 8;
     private static final int SUMMARY_BATCH_SIZE = 2;
 
     private final int memoryWindow;
     private final long sessionTtlSeconds;
+    private final int summaryMaxLength;
+    private final int factsMaxCount;
+    private final int intentMaxLength;
     private final ConcurrentHashMap<String, ConversationSession> sessions = new ConcurrentHashMap<>();
 
     public ConversationMemoryService(
             @Value("${rag.memory-window:6}") int memoryWindow,
-            @Value("${rag.session-ttl-seconds:1800}") long sessionTtlSeconds) {
+            @Value("${rag.session-ttl-seconds:1800}") long sessionTtlSeconds,
+            @Value("${rag.summary-max-length:2000}") int summaryMaxLength,
+            @Value("${rag.facts-max-count:8}") int factsMaxCount,
+            @Value("${rag.intent-max-length:200}") int intentMaxLength) {
         this.memoryWindow = memoryWindow;
         this.sessionTtlSeconds = sessionTtlSeconds;
+        this.summaryMaxLength = Math.max(summaryMaxLength, 1);
+        this.factsMaxCount = Math.max(factsMaxCount, 1);
+        this.intentMaxLength = Math.max(intentMaxLength, 1);
     }
 
     public List<ConversationMessage> getRecentMessages(String conversationId) {
@@ -74,7 +82,7 @@ public class ConversationMemoryService {
             return;
         }
 
-        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession());
+        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession(summaryMaxLength, factsMaxCount, intentMaxLength));
         session.updateSummary(summary);
     }
 
@@ -83,7 +91,7 @@ public class ConversationMemoryService {
             return;
         }
 
-        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession());
+        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession(summaryMaxLength, factsMaxCount, intentMaxLength));
         session.updateFacts(facts);
     }
 
@@ -92,7 +100,7 @@ public class ConversationMemoryService {
             return;
         }
 
-        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession());
+        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession(summaryMaxLength, factsMaxCount, intentMaxLength));
         session.updateIntent(intent);
     }
 
@@ -122,7 +130,7 @@ public class ConversationMemoryService {
             return;
         }
 
-        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession());
+        ConversationSession session = sessions.computeIfAbsent(conversationId, ignored -> new ConversationSession(summaryMaxLength, factsMaxCount, intentMaxLength));
         session.add(new ConversationMessage(role, content.trim(), Instant.now()), memoryWindow);
     }
 
@@ -151,11 +159,20 @@ public class ConversationMemoryService {
     }
 
     private static final class ConversationSession {
+        private final int summaryMaxLength;
+        private final int factsMaxCount;
+        private final int intentMaxLength;
         private final List<ConversationMessage> recentMessages = new ArrayList<>();
         private String summary;
         private List<String> facts = List.of();
         private String intent;
         private Instant lastAccessTime = Instant.now();
+
+        private ConversationSession(int summaryMaxLength, int factsMaxCount, int intentMaxLength) {
+            this.summaryMaxLength = Math.max(summaryMaxLength, 1);
+            this.factsMaxCount = Math.max(factsMaxCount, 1);
+            this.intentMaxLength = Math.max(intentMaxLength, 1);
+        }
 
         private synchronized void add(ConversationMessage message, int memoryWindow) {
             recentMessages.add(message);
@@ -178,17 +195,17 @@ public class ConversationMemoryService {
         }
 
         private synchronized void updateSummary(String summary) {
-            this.summary = normalizeOptional(summary);
+            this.summary = normalizeSummary(summary);
             touch();
         }
 
         private synchronized void updateFacts(List<String> facts) {
-            this.facts = normalizeFacts(facts);
+            this.facts = normalizeFacts(facts, factsMaxCount);
             touch();
         }
 
         private synchronized void updateIntent(String intent) {
-            this.intent = normalizeOptional(intent);
+            this.intent = normalizeIntent(intent);
             touch();
         }
 
@@ -223,10 +240,10 @@ public class ConversationMemoryService {
                 return;
             }
             if (summary == null) {
-                summary = removedSummary;
+                summary = trimToMaxLength(removedSummary, summaryMaxLength);
                 return;
             }
-            summary = summary + "\n" + removedSummary;
+            summary = trimToMaxLength(summary + "\n" + removedSummary, summaryMaxLength);
         }
 
         private synchronized void touch() {
@@ -237,6 +254,22 @@ public class ConversationMemoryService {
             return lastAccessTime;
         }
 
+        private String normalizeSummary(String summary) {
+            String normalized = normalizeOptional(summary);
+            if (normalized == null) {
+                return null;
+            }
+            return trimToMaxLength(normalized, summaryMaxLength);
+        }
+
+        private String normalizeIntent(String intent) {
+            String normalized = normalizeOptional(intent);
+            if (normalized == null) {
+                return null;
+            }
+            return trimToMaxLength(normalized, intentMaxLength);
+        }
+
         private static String normalizeOptional(String value) {
             if (value == null) {
                 return null;
@@ -245,7 +278,7 @@ public class ConversationMemoryService {
             return trimmed.isEmpty() ? null : trimmed;
         }
 
-        private static List<String> normalizeFacts(List<String> facts) {
+        private static List<String> normalizeFacts(List<String> facts, int maxFactsCount) {
             if (facts == null || facts.isEmpty()) {
                 return List.of();
             }
@@ -255,11 +288,22 @@ public class ConversationMemoryService {
                 if (value != null) {
                     normalized.add(value);
                 }
-                if (normalized.size() >= DEFAULT_FACT_LIMIT) {
+                if (normalized.size() >= Math.max(maxFactsCount, 1)) {
                     break;
                 }
             }
             return List.copyOf(normalized);
+        }
+
+        private static String trimToMaxLength(String value, int maxLength) {
+            if (value == null) {
+                return null;
+            }
+            int safeMaxLength = Math.max(maxLength, 1);
+            if (value.length() <= safeMaxLength) {
+                return value;
+            }
+            return value.substring(value.length() - safeMaxLength);
         }
     }
 }

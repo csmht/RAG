@@ -13,7 +13,7 @@ class ConversationMemoryServiceTest {
 
     @Test
     void shouldKeepRecentMessagesCompatibleWithOldInterface() {
-        ConversationMemoryService service = new ConversationMemoryService(2, 1800);
+        ConversationMemoryService service = new ConversationMemoryService(2, 1800, 2000, 8, 200);
 
         service.appendUserMessage("c1", "问题 1");
         service.appendAssistantMessage("c1", "回答 1");
@@ -30,7 +30,7 @@ class ConversationMemoryServiceTest {
 
     @Test
     void shouldExposeStructuredSnapshotWithoutBreakingDefaults() {
-        ConversationMemoryService service = new ConversationMemoryService(3, 1800);
+        ConversationMemoryService service = new ConversationMemoryService(3, 1800, 2000, 8, 200);
 
         service.appendUserMessage("c2", "请帮我分析上传失败");
         service.updateSummary("c2", "用户正在排查上传失败问题");
@@ -47,7 +47,7 @@ class ConversationMemoryServiceTest {
 
     @Test
     void shouldReturnEmptySnapshotForBlankConversationId() {
-        ConversationMemoryService service = new ConversationMemoryService(3, 1800);
+        ConversationMemoryService service = new ConversationMemoryService(3, 1800, 2000, 8, 200);
 
         ConversationMemoryService.ConversationMemorySnapshot snapshot = service.getMemorySnapshot(" ");
         assertNull(snapshot.summary());
@@ -59,7 +59,7 @@ class ConversationMemoryServiceTest {
 
     @Test
     void shouldIgnoreBlankConversationAndContent() {
-        ConversationMemoryService service = new ConversationMemoryService(3, 1800);
+        ConversationMemoryService service = new ConversationMemoryService(3, 1800, 2000, 8, 200);
 
         service.appendUserMessage(" ", "问题");
         service.appendAssistantMessage("c3", "   ");
@@ -76,7 +76,7 @@ class ConversationMemoryServiceTest {
 
     @Test
     void shouldMoveTrimmedMessagesIntoSummary() {
-        ConversationMemoryService service = new ConversationMemoryService(2, 1800);
+        ConversationMemoryService service = new ConversationMemoryService(2, 1800, 2000, 8, 200);
 
         service.appendUserMessage("c4", "问题 1");
         service.appendAssistantMessage("c4", "回答 1");
@@ -92,8 +92,36 @@ class ConversationMemoryServiceTest {
     }
 
     @Test
+    void shouldRespectConfiguredSummaryFactAndIntentLimits() {
+        ConversationMemoryService service = new ConversationMemoryService(3, 1800, 10, 2, 6);
+
+        service.updateSummary("limited", "123456789012345");
+        service.updateFacts("limited", List.of("事实 1", "事实 2", "事实 3"));
+        service.updateIntent("limited", "这是一个很长的意图描述");
+
+        ConversationMemoryService.ConversationMemorySnapshot snapshot = service.getMemorySnapshot("limited");
+        assertEquals("6789012345", snapshot.summary());
+        assertEquals(List.of("事实 1", "事实 2"), snapshot.facts());
+        assertEquals("长的意图描述", snapshot.intent());
+    }
+
+    @Test
+    void shouldTrimRollingSummaryByConfiguredMaxLength() {
+        ConversationMemoryService service = new ConversationMemoryService(1, 1800, 12, 8, 200);
+
+        service.appendUserMessage("rolling", "问题一");
+        service.appendAssistantMessage("rolling", "回答一");
+        service.appendUserMessage("rolling", "问题二");
+        service.appendAssistantMessage("rolling", "回答二");
+
+        ConversationMemoryService.ConversationMemorySnapshot snapshot = service.getMemorySnapshot("rolling");
+        assertEquals(12, snapshot.summary().length());
+        assertTrue(snapshot.summary().endsWith("用户：问题一\n助手：回答一".substring("用户：问题一\n助手：回答一".length() - 12)));
+    }
+
+    @Test
     void shouldCleanupExpiredSessions() throws InterruptedException {
-        ConversationMemoryService service = new ConversationMemoryService(3, 0);
+        ConversationMemoryService service = new ConversationMemoryService(3, 0, 2000, 8, 200);
 
         service.appendUserMessage("expired", "过期问题");
         Thread.sleep(5L);
