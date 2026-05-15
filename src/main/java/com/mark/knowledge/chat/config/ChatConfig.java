@@ -67,6 +67,18 @@ public class ChatConfig {
     @Value("${llm.vllm.api-key:}")
     private String vllmApiKey;
 
+    @Value("${llm.openai.base-url:https://api.openai.com/v1}")
+    private String openaiBaseUrl;
+
+    @Value("${llm.openai.chat-model:gpt-4o-mini}")
+    private String openaiChatModelName;
+
+    @Value("${llm.openai.embedding-model:text-embedding-3-small}")
+    private String openaiEmbeddingModelName;
+
+    @Value("${llm.openai.api-key:}")
+    private String openaiApiKey;
+
     @Value("${qdrant.host:localhost}")
     private String qdrantHost;
 
@@ -85,6 +97,7 @@ public class ChatConfig {
         return switch (normalizedProvider()) {
             case "ollama" -> createOllamaChatModel(timeout);
             case "vllm" -> createVllmChatModel(timeout);
+            case "openai" -> createOpenAiChatModel(timeout);
             default -> throw unsupportedProvider();
         };
     }
@@ -95,6 +108,7 @@ public class ChatConfig {
         return switch (normalizedProvider()) {
             case "ollama" -> createOllamaEmbeddingModel(timeout);
             case "vllm" -> createVllmEmbeddingModel(timeout);
+            case "openai" -> createOpenAiEmbeddingModel(timeout);
             default -> throw unsupportedProvider();
         };
     }
@@ -105,6 +119,7 @@ public class ChatConfig {
         return switch (normalizedProvider()) {
             case "ollama" -> createOllamaStreamingChatModel(timeout);
             case "vllm" -> createVllmStreamingChatModel(timeout);
+            case "openai" -> createOpenAiStreamingChatModel(timeout);
             default -> throw unsupportedProvider();
         };
     }
@@ -195,6 +210,48 @@ public class ChatConfig {
         return builder.build();
     }
 
+    private ChatModel createOpenAiChatModel(Duration timeout) {
+        String resolvedModelName = resolveOpenAiChatModelName();
+        log.info("初始化聊天模型: provider=openai, baseUrl={}, model={}", openaiBaseUrl, resolvedModelName);
+        var builder = OpenAiChatModel.builder()
+                .baseUrl(openaiBaseUrl)
+                .modelName(resolvedModelName)
+                .temperature(0.7)
+                .timeout(timeout);
+        if (StringUtils.hasText(openaiApiKey)) {
+            builder.apiKey(openaiApiKey);
+        }
+        return builder.build();
+    }
+
+    private StreamingChatModel createOpenAiStreamingChatModel(Duration timeout) {
+        String resolvedModelName = resolveOpenAiChatModelName();
+        log.info("初始化流式聊天模型: provider=openai, baseUrl={}, model={}", openaiBaseUrl, resolvedModelName);
+        var builder = OpenAiStreamingChatModel.builder()
+                .baseUrl(openaiBaseUrl)
+                .modelName(resolvedModelName)
+                .temperature(0.7)
+                .timeout(timeout);
+        if (StringUtils.hasText(openaiApiKey)) {
+            builder.apiKey(openaiApiKey);
+        }
+        return builder.build();
+    }
+
+    private EmbeddingModel createOpenAiEmbeddingModel(Duration timeout) {
+        String resolvedModelName = resolveOpenAiEmbeddingModelName();
+        log.info("初始化嵌入模型: provider=openai, baseUrl={}, model={}", openaiBaseUrl, resolvedModelName);
+        var builder = OpenAiEmbeddingModel.builder()
+                .baseUrl(openaiBaseUrl)
+                .modelName(resolvedModelName)
+                .encodingFormat("float")
+                .timeout(timeout);
+        if (StringUtils.hasText(openaiApiKey)) {
+            builder.apiKey(openaiApiKey);
+        }
+        return builder.build();
+    }
+
     private String resolveOllamaChatModelName() {
         if (StringUtils.hasText(chatModelName)) {
             return chatModelName;
@@ -223,16 +280,30 @@ public class ChatConfig {
         return vllmEmbeddingModelName;
     }
 
+    private String resolveOpenAiChatModelName() {
+        if (StringUtils.hasText(chatModelName)) {
+            return chatModelName;
+        }
+        return openaiChatModelName;
+    }
+
+    private String resolveOpenAiEmbeddingModelName() {
+        if (StringUtils.hasText(embeddingModelName)) {
+            return embeddingModelName;
+        }
+        return openaiEmbeddingModelName;
+    }
+
     private String normalizedProvider() {
         String provider = llmProvider == null ? "" : llmProvider.trim().toLowerCase(Locale.ROOT);
-        if ("ollama".equals(provider) || "vllm".equals(provider)) {
+        if ("ollama".equals(provider) || "vllm".equals(provider) || "openai".equals(provider)) {
             return provider;
         }
         throw unsupportedProvider();
     }
 
     private IllegalArgumentException unsupportedProvider() {
-        return new IllegalArgumentException("不支持的 llm.provider=" + llmProvider + "，仅支持 ollama 或 vllm");
+        return new IllegalArgumentException("不支持的 llm.provider=" + llmProvider + "，仅支持 ollama、vllm 或 openai");
     }
 
     private Duration parseTimeout(String timeout) {

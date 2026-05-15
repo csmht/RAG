@@ -40,6 +40,11 @@ llm:
     chat-model: ${VLLM_CHAT_MODEL:Qwen/Qwen2.5-7B-Instruct}
     embedding-model: ${VLLM_EMBEDDING_MODEL:BAAI/bge-base-zh-v1.5}
     api-key: ${VLLM_API_KEY:}
+  openai:
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+    embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    api-key: ${OPENAI_API_KEY:}
 
 qdrant:
   host: ${QDRANT_HOST:localhost}
