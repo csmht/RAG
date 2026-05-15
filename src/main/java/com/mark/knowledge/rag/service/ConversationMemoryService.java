@@ -20,6 +20,7 @@ public class ConversationMemoryService {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationMemoryService.class);
     private static final int DEFAULT_FACT_LIMIT = 8;
+    private static final int SUMMARY_BATCH_SIZE = 2;
 
     private final int memoryWindow;
     private final long sessionTtlSeconds;
@@ -194,8 +195,38 @@ public class ConversationMemoryService {
         private synchronized void trimToWindow(int memoryWindow) {
             int maxMessages = Math.max(memoryWindow, 1) * 2;
             while (recentMessages.size() > maxMessages) {
-                recentMessages.remove(0);
+                int removeCount = Math.min(SUMMARY_BATCH_SIZE, recentMessages.size() - maxMessages);
+                if (removeCount <= 0) {
+                    break;
+                }
+                summarizeAndRemove(removeCount);
             }
+        }
+
+        private synchronized void summarizeAndRemove(int removeCount) {
+            List<ConversationMessage> removedMessages = new ArrayList<>(removeCount);
+            for (int i = 0; i < removeCount; i++) {
+                removedMessages.add(recentMessages.remove(0));
+            }
+            appendSummary(removedMessages);
+        }
+
+        private void appendSummary(List<ConversationMessage> removedMessages) {
+            if (removedMessages.isEmpty()) {
+                return;
+            }
+            String removedSummary = removedMessages.stream()
+                .map(message -> (message.role() == ConversationRole.USER ? "用户：" : "助手：") + message.content())
+                .reduce((left, right) -> left + "\n" + right)
+                .orElse(null);
+            if (removedSummary == null) {
+                return;
+            }
+            if (summary == null) {
+                summary = removedSummary;
+                return;
+            }
+            summary = summary + "\n" + removedSummary;
         }
 
         private synchronized void touch() {

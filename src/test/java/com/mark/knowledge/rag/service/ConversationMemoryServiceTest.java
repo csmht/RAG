@@ -75,6 +75,23 @@ class ConversationMemoryServiceTest {
     }
 
     @Test
+    void shouldMoveTrimmedMessagesIntoSummary() {
+        ConversationMemoryService service = new ConversationMemoryService(2, 1800);
+
+        service.appendUserMessage("c4", "问题 1");
+        service.appendAssistantMessage("c4", "回答 1");
+        service.appendUserMessage("c4", "问题 2");
+        service.appendAssistantMessage("c4", "回答 2");
+        service.appendUserMessage("c4", "问题 3");
+        service.appendAssistantMessage("c4", "回答 3");
+
+        ConversationMemoryService.ConversationMemorySnapshot snapshot = service.getMemorySnapshot("c4");
+        assertEquals(List.of("问题 2", "回答 2", "问题 3", "回答 3"),
+            snapshot.recentMessages().stream().map(ConversationMemoryService.ConversationMessage::content).toList());
+        assertEquals("用户：问题 1\n助手：回答 1", snapshot.summary());
+    }
+
+    @Test
     void shouldCleanupExpiredSessions() throws InterruptedException {
         ConversationMemoryService service = new ConversationMemoryService(3, 0);
 
