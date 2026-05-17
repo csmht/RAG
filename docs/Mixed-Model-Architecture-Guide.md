@@ -1,6 +1,6 @@
 # 混合模型架构配置指南
 
-本文档详细说明如何配置和使用阿里云DashScope + 本地Ollama的混合模型架构。
+本文档说明当前项目中的模型连接配置方式。当前代码实际支持三种 provider：`ollama`、`vllm`、`openai`。其中 `ollama` 使用本地 Ollama 原生客户端，`vllm` 与 `openai` 都通过 OpenAI 兼容客户端接入，但配置语义不同：`vllm` 面向自建兼容服务，`openai` 面向官方或显式 OpenAI 接口。
 
 ## 目录
 
@@ -46,14 +46,15 @@
 
 1. **ChatModel** - 聊天模型接口
    - `OllamaChatModel` - 本地聊天模型
-   - `OpenAiChatModel` - 阿里云聊天模型（OpenAI兼容接口）
+   - `OpenAiChatModel` - OpenAI 兼容聊天模型，用于 `vllm` 与 `openai`
 
-2. **EmbeddingModel** - 嵌入模型（固定使用本地）
+2. **EmbeddingModel** - 嵌入模型接口
    - `OllamaEmbeddingModel` - 本地向量嵌入模型
+   - `OpenAiEmbeddingModel` - OpenAI 兼容向量嵌入模型，用于 `vllm` 与 `openai`
 
-3. **ModelRouterService** - 模型路由服务
-   - 根据策略选择合适的模型
-   - 支持百分比和业务类型两种路由策略
+3. **Provider 分发** - 模型连接分发入口
+   - 当前由 `ChatConfig` 根据 `llm.provider` 选择具体模型实现
+   - 当前代码未实现文档中描述的路由服务、百分比路由与业务类型路由
 
 ---
 

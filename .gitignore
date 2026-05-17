@@ -36,3 +36,5 @@ build/
 .claude
 log.txt
 /src/main/resources/application.yaml
+/textDate/
+/uploads/

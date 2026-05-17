@@ -30,6 +30,8 @@ public class SecurityConfig {
                         // 登录接口允许匿名访问
                         .requestMatchers("/api/auth/login").permitAll()
                         .requestMatchers("/api/rag/**").permitAll()
+                        .requestMatchers("/error").permitAll()
+                        .requestMatchers("/css/**", "/js/**", "/images/**", "/webjars/**", "/favicon.ico").permitAll()
                         // 其他所有 API 都需要认证
                         .anyRequest().authenticated()
                 )
