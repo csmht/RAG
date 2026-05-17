@@ -41,27 +41,6 @@ public class RagService {
     private final RagStreamSessionManager ragStreamSessionManager;
 
     /**
-     * 创建 RAG 问答服务并注入其依赖组件。
-     */
-    public RagService(
-            dev.langchain4j.model.chat.ChatModel chatModel,
-            dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
-            dev.langchain4j.model.embedding.EmbeddingModel embeddingModel,
-            dev.langchain4j.store.embedding.EmbeddingStore<dev.langchain4j.data.segment.TextSegment> embeddingStore,
-            ConversationMemoryService conversationMemoryService,
-            Bm25Scorer bm25Scorer) {
-        this(
-            chatModel,
-            streamingChatModel,
-            conversationMemoryService,
-            new RagContextAssembler(),
-            new RagRetrievalService(embeddingModel, embeddingStore, bm25Scorer),
-            new RagMemoryOrchestrator(chatModel, conversationMemoryService, new RagContextAssembler()),
-            new RagStreamSessionManager()
-        );
-    }
-
-    /**
      * 创建 RAG 问答服务并注入拆分后的协作组件。
      */
     @Autowired

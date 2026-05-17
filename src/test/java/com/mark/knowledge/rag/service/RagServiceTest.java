@@ -19,6 +19,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 
@@ -40,18 +41,23 @@ class RagServiceTest {
     private EmbeddingStore<TextSegment> embeddingStore;
 
     private ConversationMemoryService memoryService;
+    private RagRetrievalService retrievalService;
     private RagService ragService;
 
     @BeforeEach
     void setUp() {
         memoryService = new ConversationMemoryService(3, 1800, 2000, 8, 200);
+        RagContextAssembler assembler = new RagContextAssembler();
+        retrievalService = new RagRetrievalService(embeddingModel, embeddingStore, new Bm25Scorer());
+        RagMemoryOrchestrator memoryOrchestrator = new RagMemoryOrchestrator(chatModel, memoryService, assembler);
         ragService = new RagService(
             chatModel,
             streamingChatModel,
-            embeddingModel,
-            embeddingStore,
             memoryService,
-            new Bm25Scorer()
+            assembler,
+            retrievalService,
+            memoryOrchestrator,
+            new RagStreamSessionManager()
         );
     }
 
@@ -80,8 +86,8 @@ class RagServiceTest {
 
     @Test
     void shouldAllowMoreInitialRecallButRespectConfiguredMaxResultsWhenBm25Reranking() {
-        ReflectionTestSupport.setField(ragService, "ragRetrievalService.maxResults", 3);
-        ReflectionTestSupport.setField(ragService, "ragRetrievalService.rerankCandidateMultiplier", 4);
+        ReflectionTestUtils.setField(retrievalService, "maxResults", 3);
+        ReflectionTestUtils.setField(retrievalService, "rerankCandidateMultiplier", 4);
 
         Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
         List<EmbeddingMatch<TextSegment>> matches = List.of(
@@ -118,24 +124,5 @@ class RagServiceTest {
         Metadata metadata = Metadata.metadata("filename", id + ".txt");
         TextSegment segment = TextSegment.from(text, metadata);
         return new EmbeddingMatch<>(score, id, embedding, segment);
-    }
-
-    private static final class ReflectionTestSupport {
-        private static void setField(RagService ragService, String path, Object value) {
-            try {
-                String[] parts = path.split("\\.");
-                Object target = ragService;
-                for (int i = 0; i < parts.length - 1; i++) {
-                    var field = target.getClass().getDeclaredField(parts[i]);
-                    field.setAccessible(true);
-                    target = field.get(target);
-                }
-                var field = target.getClass().getDeclaredField(parts[parts.length - 1]);
-                field.setAccessible(true);
-                field.set(target, value);
-            } catch (ReflectiveOperationException e) {
-                throw new RuntimeException(e);
-            }
-        }
     }
 }

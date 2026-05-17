@@ -24,9 +24,6 @@ public class RagMemoryOrchestrator {
 
     private static final Logger log = LoggerFactory.getLogger(RagMemoryOrchestrator.class);
 
-    @Value("${rag.summary-compress-threshold-ratio:1.0}")
-    private double summaryCompressThresholdRatio = 1.0;
-
     @Value("${rag.memory-fact-score-threshold:0.6}")
     private double memoryFactScoreThreshold = 0.6;
 
@@ -143,7 +140,7 @@ public class RagMemoryOrchestrator {
             }
             String summary = memorySummaryModelEnabled
                 ? summarizeHistory(source)
-                : ragContextAssembler.trimToMaxLength(source, memorySummarySourceMaxLength);
+                : RagTextSupport.trimToMaxLength(source, memorySummarySourceMaxLength);
             if (StringUtils.hasText(summary)) {
                 conversationMemoryService.updateSummary(conversationId, summary);
             }
@@ -151,6 +148,7 @@ public class RagMemoryOrchestrator {
             log.warn("异步压缩历史摘要失败: conversationId={}, message={}", conversationId, e.getMessage());
         } finally {
             state.set(false);
+            summaryCompressionStates.remove(conversationId, state);
         }
     }
 
@@ -178,7 +176,7 @@ public class RagMemoryOrchestrator {
     private String buildIntentExtractionPrompt(ConversationMemoryService.ConversationMemorySnapshot memory, String question, String rewrittenQuestion) {
         String memoryContext = ragContextAssembler.buildMemoryContext(memory);
         String safeMemoryContext = StringUtils.hasText(memoryContext)
-            ? ragContextAssembler.trimToMaxLength(memoryContext, memoryIntentMaxSourceLength)
+            ? RagTextSupport.trimToMaxLength(memoryContext, memoryIntentMaxSourceLength)
             : "无";
         return String.format("""
             你需要根据会话记忆、用户原问题和改写后的问题，总结当前轮次最核心的会话意图。
@@ -209,7 +207,7 @@ public class RagMemoryOrchestrator {
         if (!StringUtils.hasText(normalized)) {
             return null;
         }
-        if (List.of("无", "未知", "未提及", "无法判断").contains(normalized)) {
+        if (RagTextSupport.INVALID_MARKERS.contains(normalized)) {
             return null;
         }
         return normalized;
@@ -223,7 +221,7 @@ public class RagMemoryOrchestrator {
         if (segment == null || !StringUtils.hasText(segment.text())) {
             return List.of();
         }
-        String content = ragContextAssembler.trimToMaxLength(segment.text(), memoryTopMatchMaxLength);
+        String content = RagTextSupport.trimToMaxLength(segment.text(), memoryTopMatchMaxLength);
         return content.lines().map(String::trim).filter(StringUtils::hasText).toList();
     }
 
@@ -234,7 +232,7 @@ public class RagMemoryOrchestrator {
         if (facts == null || facts.isEmpty()) {
             return List.of();
         }
-        List<String> invalidMarkers = List.of("无", "未知", "未提及", "无法判断");
+        List<String> invalidMarkers = RagTextSupport.INVALID_MARKERS;
         List<String> normalized = new ArrayList<>();
         for (String fact : facts) {
             if (!StringUtils.hasText(fact)) {
@@ -265,6 +263,6 @@ public class RagMemoryOrchestrator {
 
             会话历史：
             %s
-            """, ragContextAssembler.trimToMaxLength(source, memorySummarySourceMaxLength));
+            """, RagTextSupport.trimToMaxLength(source, memorySummarySourceMaxLength));
     }
 }

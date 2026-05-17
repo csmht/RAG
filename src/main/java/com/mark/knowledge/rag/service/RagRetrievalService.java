@@ -125,7 +125,7 @@ public class RagRetrievalService {
                 TextSegment segment = match.segment();
                 String filename = segment.metadata() != null
                     ? segment.metadata().getString("filename")
-                    : "unknown";
+                    : RagTextSupport.UNKNOWN_FILENAME;
                 return new SourceReference(filename, segment.text(), match.finalScore());
             })
             .collect(Collectors.toList());

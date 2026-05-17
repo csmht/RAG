@@ -96,14 +96,7 @@ public class RagContextAssembler {
      * 按最大长度截断文本，优先保留尾部最新内容。
      */
     public String trimToMaxLength(String value, int maxLength) {
-        if (!StringUtils.hasText(value)) {
-            return value;
-        }
-        int safeMaxLength = Math.max(maxLength, 1);
-        if (value.length() <= safeMaxLength) {
-            return value;
-        }
-        return value.substring(value.length() - safeMaxLength);
+        return RagTextSupport.trimToMaxLength(value, maxLength);
     }
 
     /**
