@@ -1,12 +1,10 @@
 package com.mark.knowledge.rag.service;
 
+import com.mark.knowledge.rag.dto.HybridMatch;
 import com.mark.knowledge.rag.dto.RagRequest;
-import com.mark.knowledge.rag.dto.RagResponse;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.chat.ChatModel;
-import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
@@ -19,69 +17,35 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class RagServiceTest {
+class RagRetrievalServiceTest {
 
-    @Mock
-    private ChatModel chatModel;
-    @Mock
-    private StreamingChatModel streamingChatModel;
     @Mock
     private EmbeddingModel embeddingModel;
     @Mock
     private EmbeddingStore<TextSegment> embeddingStore;
 
-    private ConversationMemoryService memoryService;
-    private RagService ragService;
+    private RagRetrievalService retrievalService;
 
     @BeforeEach
     void setUp() {
-        memoryService = new ConversationMemoryService(3, 1800, 2000, 8, 200);
-        ragService = new RagService(
-            chatModel,
-            streamingChatModel,
-            embeddingModel,
-            embeddingStore,
-            memoryService,
-            new Bm25Scorer()
-        );
-    }
-
-    @Test
-    void shouldUpdateIntentAndFactsDuringAskFlow() {
-        Metadata metadata = Metadata.metadata("filename", "guide.txt");
-        TextSegment segment = TextSegment.from("系统要求上传文件大小不能超过 50MB，且仅支持 pdf 文件。", metadata);
-        Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
-        EmbeddingMatch<TextSegment> match = new EmbeddingMatch<>(0.92, "m1", embedding, segment);
-
-        when(chatModel.chat(any(String.class)))
-            .thenReturn("定位上传限制")
-            .thenReturn("请先检查文件大小与格式限制");
-        when(embeddingModel.embed(any(String.class))).thenReturn(Response.from(embedding));
-        when(embeddingStore.search(any(EmbeddingSearchRequest.class)))
-            .thenReturn(new EmbeddingSearchResult<>(List.of(match)));
-
-        RagResponse response = ragService.ask(new RagRequest("为什么上传失败", "conv-1", 3));
-        assertEquals("请先检查文件大小与格式限制", response.answer());
-
-        ConversationMemoryService.ConversationMemorySnapshot snapshot = memoryService.getMemorySnapshot("conv-1");
-        assertEquals("定位上传限制", snapshot.intent());
-        assertEquals(List.of("系统要求上传文件大小不能超过 50MB，且仅支持 pdf 文件。"), snapshot.facts());
-        assertEquals(2, snapshot.recentMessages().size());
+        retrievalService = new RagRetrievalService(embeddingModel, embeddingStore, new Bm25Scorer());
     }
 
     @Test
     void shouldAllowMoreInitialRecallButRespectConfiguredMaxResultsWhenBm25Reranking() {
-        ReflectionTestSupport.setField(ragService, "ragRetrievalService.maxResults", 3);
-        ReflectionTestSupport.setField(ragService, "ragRetrievalService.rerankCandidateMultiplier", 4);
+        ReflectionTestUtils.setField(retrievalService, "maxResults", 3);
+        ReflectionTestUtils.setField(retrievalService, "rerankCandidateMultiplier", 4);
 
         Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
         List<EmbeddingMatch<TextSegment>> matches = List.of(
@@ -99,43 +63,38 @@ class RagServiceTest {
             buildMatch("m12", 0.69, "配置说明十二：高并发场景需扩容。", embedding)
         );
 
-        when(chatModel.chat(any(String.class)))
-            .thenReturn("定位物理配置")
-            .thenReturn("请优先参考物理配置相关片段");
         when(embeddingModel.embed(any(String.class))).thenReturn(Response.from(embedding));
         when(embeddingStore.search(any(EmbeddingSearchRequest.class)))
             .thenReturn(new EmbeddingSearchResult<>(matches));
 
-        RagResponse response = ragService.ask(new RagRequest("搭建 RAG 需要什么物理配置", "conv-bm25", 10));
+        var result = retrievalService.retrieve("搭建 RAG 需要什么物理配置", new RagRequest("搭建 RAG 需要什么物理配置", "conv-bm25", 10));
 
         ArgumentCaptor<EmbeddingSearchRequest> captor = ArgumentCaptor.forClass(EmbeddingSearchRequest.class);
         verify(embeddingStore).search(captor.capture());
         assertEquals(12, captor.getValue().maxResults());
-        assertEquals(3, response.sources().size());
+        assertEquals(3, result.sources().size());
+    }
+
+    @Test
+    void shouldConvertMatchesToSourceReferences() {
+        Embedding embedding = Embedding.from(new float[]{0.1f, 0.2f});
+        HybridMatch match = new HybridMatch(
+            buildMatch("guide", 0.95, "文档内容", embedding).embedded(),
+            0.95,
+            0.80,
+            0.90
+        );
+
+        var sources = retrievalService.toSourceReferences(List.of(match));
+        assertEquals(1, sources.size());
+        assertEquals("guide.txt", sources.getFirst().filename());
+        assertEquals("文档内容", sources.getFirst().excerpt());
+        assertTrue(sources.getFirst().relevanceScore() > 0.0);
     }
 
     private EmbeddingMatch<TextSegment> buildMatch(String id, double score, String text, Embedding embedding) {
         Metadata metadata = Metadata.metadata("filename", id + ".txt");
         TextSegment segment = TextSegment.from(text, metadata);
         return new EmbeddingMatch<>(score, id, embedding, segment);
-    }
-
-    private static final class ReflectionTestSupport {
-        private static void setField(RagService ragService, String path, Object value) {
-            try {
-                String[] parts = path.split("\\.");
-                Object target = ragService;
-                for (int i = 0; i < parts.length - 1; i++) {
-                    var field = target.getClass().getDeclaredField(parts[i]);
-                    field.setAccessible(true);
-                    target = field.get(target);
-                }
-                var field = target.getClass().getDeclaredField(parts[parts.length - 1]);
-                field.setAccessible(true);
-                field.set(target, value);
-            } catch (ReflectiveOperationException e) {
-                throw new RuntimeException(e);
-            }
-        }
     }
 }
