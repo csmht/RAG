@@ -448,7 +448,7 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
     }
 
     /**
-     * 检测文本是否仅为空白或垃圾内容
+     * 检测文本是否仅为空白或垃圾内容。
      */
     private boolean isOnlyWhitespaceOrGarbage(String text) {
         if (text == null) {
@@ -458,30 +458,34 @@ public class MultiFormatDocumentServiceImpl implements MultiFormatDocumentServic
         if (trimmed.isEmpty()) {
             return true;
         }
-        String lower = trimmed.toLowerCase();
-        if (lower.contains("处理失败") || lower.contains("error") || lower.contains("exception") ||
-            lower.contains("未提取") || lower.contains("失败") || lower.contains("错误")) {
+
+        long meaningfulCharCount = trimmed.chars()
+                .filter(ch -> !Character.isWhitespace(ch) && !Character.isISOControl(ch))
+                .count();
+        if (meaningfulCharCount == 0) {
             return true;
         }
-        long letterCount = text.chars().filter(Character::isLetter).count();
-        if (letterCount > 0 && (double) letterCount / text.length() < 0.2) {
-            return true;
-        }
-        return false;
+
+        long letterOrDigitCount = trimmed.chars()
+                .filter(ch -> Character.isLetterOrDigit(ch) || Character.getType(ch) == Character.OTHER_LETTER)
+                .count();
+        return letterOrDigitCount == 0
+                || (double) letterOrDigitCount / meaningfulCharCount < 0.2;
     }
 
     /**
-     * 向量化前清理文本，防止失败信息被当正文处理
+     * 向量化前清理文本，仅拦截真正为空或近似垃圾内容的文本。
      */
     private String sanitizeTextBeforeEmbedding(String text) {
         if (text == null) {
             return null;
         }
-        String lower = text.toLowerCase();
-        if (lower.contains("处理失败") || lower.contains("error") || lower.contains("exception") ||
-            lower.contains("未提取") || lower.contains("失败") || lower.contains("错误") ||
-            lower.contains("ocr") || lower.contains("extract")) {
-            log.warn("检测到错误信息混入正文，拒绝向量化");
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        if (isOnlyWhitespaceOrGarbage(trimmed)) {
+            log.warn("文本内容近似空白或乱码，跳过向量化");
             return null;
         }
         return text;

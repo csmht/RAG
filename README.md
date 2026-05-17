@@ -90,9 +90,10 @@
 
 - Java 21+
 - Maven 3.9+
-- Ollama
+- Ollama（使用 `llm.provider=ollama` 时需要）
 - Qdrant
-- 阿里云DashScope API Key（可选，用于混合模型）
+- OpenAI API Key（使用 `llm.provider=openai` 时需要）
+- vLLM 服务与 API Key（使用 `llm.provider=vllm` 时按实际部署决定）
 
 ### 安装运行
 
@@ -203,11 +204,31 @@ curl -N -X POST http://localhost:8080/api/rag/ask/stream \
 ### application.yaml 关键配置
 
 ```yaml
-# Ollama 配置
-ollama:
-  base-url: http://localhost:11434
-  chat-model: qwen2.5:7b
-  embedding-model: qwen3-embedding:0.6b
+llm:
+  provider: ${LLM_PROVIDER:ollama}
+  timeout: ${LLM_TIMEOUT:120s}
+  chat-model: ${LLM_CHAT_MODEL:}
+  embedding-model: ${LLM_EMBEDDING_MODEL:}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    chat-model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+    embedding-model: ${OLLAMA_EMBEDDING_MODEL:bge-base-zh-v1.5}
+    think: ${OLLAMA_THINK:false}
+  vllm:
+    base-url: ${VLLM_BASE_URL:http://localhost:8000/v1}
+    chat-model: ${VLLM_CHAT_MODEL:Qwen/Qwen2.5-7B-Instruct}
+    embedding-model: ${VLLM_EMBEDDING_MODEL:BAAI/bge-base-zh-v1.5}
+    api-key: ${VLLM_API_KEY:}
+  openai:
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    chat-model: ${OPENAI_CHAT_MODEL:gpt-4o-mini}
+    embedding-model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
+    api-key: ${OPENAI_API_KEY:}
+```
+
+- `llm.provider` 支持 `ollama`、`vllm`、`openai`
+- `llm.chat-model` 与 `llm.embedding-model` 为全局覆盖项，配置后会优先于 provider 专属模型名生效
+- `openai` 与 `vllm` 都走 OpenAI 兼容客户端，但配置语义不同：`openai` 用于官方或显式 OpenAI 接口，`vllm` 用于自建兼容服务
 
 # Qdrant 配置
 qdrant:

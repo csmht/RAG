@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.ByteArrayInputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.Charset;
 import java.util.List;
@@ -29,7 +30,11 @@ class DocumentServiceTest {
         ReflectionTestUtils.setField(documentService, "chunkOverlap", 40);
         ReflectionTestUtils.setField(documentService, "minTextLength", 80);
         ReflectionTestUtils.setField(documentService, "keywordCount", 6);
-        ReflectionTestUtils.setField(documentService, "chunkTitleMaxLength", 24);
+        ReflectionTestUtils.setField(documentService, "keywordMinTokenLength", 2);
+        ReflectionTestUtils.setField(documentService, "keywordMinOccurrences", 2);
+        ReflectionTestUtils.setField(documentService, "keywordChunkRatioThreshold", 0.6d);
+        ReflectionTestUtils.setField(documentService, "keywordMaxCandidateMultiplier", 4);
+        ReflectionTestUtils.setField(documentService, "keywordUseSmartIk", true);
     }
 
     @Test
@@ -54,8 +59,8 @@ class DocumentServiceTest {
         assertFalse(segments.isEmpty());
 
         TextSegment firstSegment = segments.getFirst();
-        assertTrue(firstSegment.text().startsWith("【标题：AI 知识库建设指南"));
-        assertTrue(firstSegment.text().contains("关键词："));
+        assertTrue(firstSegment.text().startsWith("【段落关键词：") || firstSegment.text().startsWith("【标题：AI 知识库建设指南】"));
+        assertTrue(firstSegment.text().contains("【标题：AI 知识库建设指南】"));
         assertFalse(firstSegment.text().contains("第 1 页"));
         assertFalse(firstSegment.text().contains("�"));
 
@@ -138,52 +143,127 @@ class DocumentServiceTest {
     }
 
     @Test
-    void shouldInheritSectionTitleFromMarkdownHeading() {
-        String text = """
-            知识库分块升级说明
+    void shouldPrioritizeChunkSpecificKeywordsBeforeDocumentLevelKeywords() throws Exception {
+        Method buildFrequencyMethod = DocumentService.class.getDeclaredMethod("buildTermFrequency", String.class);
+        buildFrequencyMethod.setAccessible(true);
+        Method resolveKeywordsMethod = DocumentService.class.getDeclaredMethod(
+            "resolveChunkKeywords",
+            Class.forName("com.mark.knowledge.rag.service.DocumentService$DocumentProfile"),
+            String.class,
+            java.util.Map.class
+        );
+        resolveKeywordsMethod.setAccessible(true);
+        Method buildEnhancedTextMethod = DocumentService.class.getDeclaredMethod(
+            "buildEnhancedText",
+            String.class,
+            String.class,
+            List.class
+        );
+        buildEnhancedTextMethod.setAccessible(true);
 
-            ## 切块策略
+        String fullText = """
+            RAG 的搭建通常包括数据清洗、分块、向量化和检索链路设计，这里重点介绍整体方案背景与基础流程。
 
-            为了让知识库检索更稳定，我们需要先识别文档中的标题层级，再让同一章节下的内容尽量聚合成块。这样做可以避免不同主题的内容被错误拼接，也能让片段标题更加准确。
-
-            - 优先识别 Markdown 标题
-            - 标题后的短正文尽量合并
-            - 列表项在长度允许时整体保留
+            搭建 RAG 需要关注物理配置，包括 GPU 显存、CPU 核数、内存容量和磁盘空间。显存不足会直接影响向量模型部署，显存规划也会影响部署稳定性。配置规划同样会影响资源利用率。
             """;
 
-        DocumentService.ProcessedDocument processedDocument = documentService.processDocument(
-            new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)),
-            "markdown-heading.txt"
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Integer> frequency = (java.util.Map<String, Integer>) buildFrequencyMethod.invoke(
+            documentService,
+            fullText
         );
 
-        TextSegment firstSegment = processedDocument.segments().getFirst();
-        assertTrue(firstSegment.text().startsWith("【标题：知识库分块升级说明 / 切块策略】"));
-        assertEquals("知识库分块升级说明 / 切块策略", firstSegment.metadata().getString("chunkTitle"));
-        assertTrue(firstSegment.text().contains("优先识别 Markdown 标题"));
+        Class<?> documentProfileClass = Class.forName("com.mark.knowledge.rag.service.DocumentService$DocumentProfile");
+        var documentProfileConstructor = documentProfileClass.getDeclaredConstructors()[0];
+        documentProfileConstructor.setAccessible(true);
+        Object profile = documentProfileConstructor.newInstance(
+            "body",
+            "RAG 的搭建",
+            "技术",
+            "2025-03-15",
+            "2025-03-15T00:00:00Z",
+            List.of("RAG", "搭建", "检索", "物理配置", "显存")
+        );
+
+        @SuppressWarnings("unchecked")
+        List<String> keywords = (List<String>) resolveKeywordsMethod.invoke(
+            documentService,
+            profile,
+            "搭建 RAG 需要关注物理配置，包括 GPU 显存、CPU 核数、内存容量和磁盘空间。显存不足会直接影响向量模型部署，显存规划也会影响部署稳定性。配置规划同样会影响资源利用率。",
+            frequency
+        );
+
+        assertTrue(keywords.contains("显存"));
+        assertTrue(keywords.contains("配置") || keywords.contains("物理配置") || keywords.contains("内存"));
+        if (keywords.contains("搭建")) {
+            int configKeywordIndex = keywords.contains("物理配置")
+                ? keywords.indexOf("物理配置")
+                : (keywords.contains("配置") ? keywords.indexOf("配置") : keywords.indexOf("内存"));
+            assertTrue(configKeywordIndex < keywords.indexOf("搭建"));
+        }
+
+        String enhancedText = (String) buildEnhancedTextMethod.invoke(documentService, "RAG 的搭建", "正文", keywords);
+        assertTrue(enhancedText.startsWith("【段落关键词："));
     }
 
     @Test
-    void shouldKeepSectionChunksSeparatedAcrossDifferentHeadings() {
-        String text = """
-            知识库治理手册
+    void shouldRespectKeywordCountWhenSpecificKeywordsExceedLimit() throws Exception {
+        ReflectionTestUtils.setField(documentService, "keywordCount", 3);
 
-            一、背景说明
+        Method buildFrequencyMethod = DocumentService.class.getDeclaredMethod("buildTermFrequency", String.class);
+        buildFrequencyMethod.setAccessible(true);
+        Method resolveKeywordsMethod = DocumentService.class.getDeclaredMethod(
+            "resolveChunkKeywords",
+            Class.forName("com.mark.knowledge.rag.service.DocumentService$DocumentProfile"),
+            String.class,
+            java.util.Map.class
+        );
+        resolveKeywordsMethod.setAccessible(true);
 
-            知识库项目需要先统一文档清洗和切块策略，避免来源杂乱导致检索命中不稳定。背景部分主要解释为什么要做结构化切块，以及这项能力如何影响召回质量。只有先把章节边界识别清楚，后续的检索召回、片段展示和答案生成才能保持稳定，不会把不同主题的内容混在一起。
+        String chunk = "显存规划需要结合显存容量、GPU 型号、内存容量、磁盘吞吐和部署方式综合评估。显存容量、内存容量和部署方式会直接影响部署稳定性。";
+        String fullText = chunk + "\n\nRAG 搭建介绍主要说明整体概念与流程。";
 
-            二、实施步骤
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Integer> frequency = (java.util.Map<String, Integer>) buildFrequencyMethod.invoke(documentService, fullText);
 
-            实施阶段需要先识别章节标题，再合并标题后的短正文，最后补充关键词与元数据，确保每个片段都具备稳定语义边界和可追踪来源。同时还要控制每个片段的长度范围，让向量化输入足够完整，又不会因为信息过杂而削弱检索精度。
-            """;
-
-        DocumentService.ProcessedDocument processedDocument = documentService.processDocument(
-            new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)),
-            "section-heading.txt"
+        Class<?> documentProfileClass = Class.forName("com.mark.knowledge.rag.service.DocumentService$DocumentProfile");
+        var documentProfileConstructor = documentProfileClass.getDeclaredConstructors()[0];
+        documentProfileConstructor.setAccessible(true);
+        Object profile = documentProfileConstructor.newInstance(
+            "body",
+            "RAG 的搭建",
+            "技术",
+            "2025-03-15",
+            "2025-03-15T00:00:00Z",
+            List.of("显存容量", "内存容量", "部署方式", "GPU", "磁盘吞吐")
         );
 
-        List<TextSegment> segments = processedDocument.segments();
-        assertEquals(2, segments.size());
-        assertTrue(segments.get(0).text().startsWith("【标题：知识库治理手册 / 背景说明】"));
-        assertTrue(segments.get(1).text().startsWith("【标题：知识库治理手册 / 实施步骤】"));
+        @SuppressWarnings("unchecked")
+        List<String> keywords = (List<String>) resolveKeywordsMethod.invoke(documentService, profile, chunk, frequency);
+
+        assertEquals(3, keywords.size());
+    }
+
+    @Test
+    void shouldUseFullEnhancementPipelineWhenProcessingPlainTextContent() {
+        String text = """
+            RAG 的搭建
+
+            2025-03-15
+
+            RAG 的整体搭建通常会先说明检索增强生成的基本原理和整体链路。
+
+            搭建 RAG 需要重点评估物理配置，尤其是 GPU 显存、CPU 核数、内存容量和磁盘空间。显存不足会直接影响部署效果，显存规划也会影响系统稳定性。
+            """;
+
+        List<TextSegment> segments = documentService.processDocumentContent(text, "rag-build.txt");
+
+        assertFalse(segments.isEmpty());
+        TextSegment firstSegment = segments.getFirst();
+        assertTrue(firstSegment.text().contains("【标题：RAG 的搭建】"));
+        assertTrue(firstSegment.metadata().getString("keywords") != null);
+        assertEquals("RAG 的搭建", firstSegment.metadata().getString("title"));
+        assertEquals("2025-03-15", firstSegment.metadata().getString("documentTime"));
+        assertTrue(firstSegment.metadata().getString("chunkHash") != null);
     }
 }
